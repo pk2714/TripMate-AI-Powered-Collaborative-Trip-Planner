@@ -1,0 +1,201 @@
+# TripMate – AI Trip Planner & Map Integration 📍
+## Phase 6 & Phase 7 Implementation Report
+
+**Project:** TripMate – AI Powered Collaborative Trip Planner
+
+**Status:** Phase  6 Completed |   Phase 7 Completed
+
+---
+
+# Overview
+
+This document describes the implementation of **Phase 6 (AI Trip Planner)** and **Phase 7 (Map Integration)** of the TripMate project.
+
+Phase 6 integrates **Google Gemini AI** to automatically generate structured travel itineraries based on trip details.
+
+Phase 7 integrates **Geoapify APIs** with **Leaflet** to provide an interactive map, destination visualization, and nearby places such as hospitals, hotels, restaurants, petrol pumps, and tourist attractions.
+
+---
+
+# Technology Stack
+
+| Phase | Primary Service | Database |
+|--------|-----------------|----------|
+| Phase 6 | Google Gemini API (gemini-2.5-flash) | MongoDB |
+| Phase 7 | Geoapify APIs + Leaflet | MongoDB |
+
+---
+
+# Phase 6 – AI Trip Planner
+
+## APIs Used
+
+| API | Type | Purpose |
+|------|------|---------|
+| Google Gemini API (gemini-2.5-flash) | External API | AI itinerary generation |
+| POST /api/ai/trips/:id/itinerary | REST API | Generate itinerary |
+
+---
+
+## Backend Modules
+
+- controllers/aiController.js
+- routes/aiRoutes.js
+- models/Trip.js
+- middleware/auth.js
+- config/db.js
+
+---
+
+## Frontend Modules
+
+- pages/TripDetails.jsx
+- api/axios.js
+
+---
+
+## Libraries Used
+
+- @google/genai
+- axios
+- express
+- mongoose
+
+---
+
+## React Hooks
+
+- useState
+- useEffect
+
+---
+
+## Core Functions
+
+- buildPrompt()
+- generateItinerary()
+- Trip.findById()
+- trip.save()
+- JSON.parse()
+- JSON.stringify()
+- api.post()
+- setTrip()
+
+---
+
+## Features Implemented
+
+- AI itinerary generation
+- Structured JSON parsing
+- Day-wise itinerary
+- Budget estimation
+- Packing checklist
+- Food recommendations
+- Hotel recommendations
+- Travel tips
+- Safety recommendations
+- MongoDB itinerary caching
+- Regenerate itinerary
+- API error handling
+
+---
+
+# Phase 7 – Map Integration
+
+## APIs Used
+
+| API | Type | Purpose |
+|------|------|---------|
+| Geoapify Geocoding API | External API | Convert destination into coordinates |
+| Geoapify Places API | External API | Nearby place search |
+| Geoapify Map Tiles | External API | Map rendering |
+| GET /api/maps/nearby | REST API | Backend proxy endpoint |
+
+---
+
+## Backend Modules
+
+- controllers/mapController.js
+- routes/mapRoutes.js
+- server.js
+
+---
+
+## Frontend Modules
+
+- components/TripMap.jsx
+- pages/TripDetails.jsx
+- api/axios.js
+
+---
+
+## Libraries Used
+
+- leaflet
+- react-leaflet
+- axios
+- react
+- express
+
+---
+
+## React Hooks
+
+- useState
+- useEffect
+- useCallback
+
+---
+
+## Leaflet Components
+
+- MapContainer
+- TileLayer
+- Marker
+- Popup
+- useMap()
+
+---
+
+## Core Functions
+
+- getNearbyPlaces()
+- api.get()
+- fetch()
+- navigator.geolocation()
+- setMarkers()
+
+---
+
+## Features Implemented
+
+- Interactive destination map
+- Destination marker
+- Nearby hospitals
+- Nearby hotels
+- Nearby restaurants
+- Nearby petrol pumps
+- Nearby tourist attractions
+- Current user location
+- Dynamic marker rendering
+- Integrated Map tab
+- Error handling for invalid locations and API failures
+
+---
+
+# Overall Summary
+
+Phase 6 introduces an AI-powered itinerary generation system using the **Google Gemini API**. The generated itinerary includes day-wise planning, budget estimation, hotel recommendations, food suggestions, packing checklist, travel tips, and safety recommendations. The generated data is stored in MongoDB and can be regenerated whenever required.
+
+Phase 7 enhances the user experience by integrating **Geoapify APIs** with **Leaflet** to provide an interactive map. Users can visualize trip destinations and search nearby hospitals, hotels, restaurants, petrol pumps, and tourist attractions. Dynamic markers, geolocation support, and real-time map rendering create a complete travel planning experience.
+
+Together, these two phases combine Artificial Intelligence with real-world geospatial services, making TripMate an intelligent and interactive collaborative trip planning platform.
+
+---
+
+**Status**
+
+- ✅ Phase 6 Completed
+- ✅ Phase 7 Completed
+
+**Project:** TripMate – AI Powered Collaborative Trip Planner
