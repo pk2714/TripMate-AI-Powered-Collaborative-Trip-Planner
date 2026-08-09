@@ -1,0 +1,423 @@
+# TripMate — Phase 10: Emergency & Safety Module
+
+## Overview
+
+Phase 10 adds an Emergency & Safety Module to TripMate.
+
+**Core features:**
+- Emergency SOS with live geolocation
+- Nearby hospitals & police stations (via Geoapify)
+- Distance-based sorting (Haversine)
+- Google Maps directions
+- Emergency contact + one-tap calling
+- Static First Aid Guide
+- Robust error handling (including partial API failure)
+
+**Main flow:**
+
+```
+User → SOS → Geolocation → Lat/Lng → Nearby API → Geoapify → Resources → Distance → Sort → Display
+```
+
+---
+
+## 1. Emergency Page
+
+**File:** `frontend/src/pages/Emergency.jsx`
+
+Sections:
+1. Emergency SOS
+2. Nearby Emergency Resources (hospitals + police)
+3. Emergency Contact
+4. First Aid Guide
+
+Built with React + Tailwind CSS.
+
+---
+
+## 2. SOS Flow
+
+```
+SOS Button
+   ↓
+Check Geolocation Support
+   ↓
+Request Location Permission
+   ↓
+Get Latitude + Longitude
+   ↓
+Call Nearby Resource API
+   ↓
+Get Hospitals + Police
+   ↓
+Display Results
+```
+
+Uses the browser's `navigator.geolocation.getCurrentPosition()`.
+
+**Note:** This is the user's *current* location — different from Trip Map, which shows the *trip destination*. This makes Emergency useful even when traveling away from the planned destination.
+
+---
+
+## 3. Geolocation Error Handling
+
+| Case | Message |
+|---|---|
+| Permission denied | "Location permission was denied." |
+| Position unavailable | "Unable to determine your location." |
+| Timeout | "Location request timed out." |
+| Unsupported browser | "Geolocation is not supported by your browser." |
+
+Prevents silent failures on the page.
+
+---
+
+## 4. Nearby Resource API (Reused from Map Module)
+
+Instead of building a new Emergency-specific endpoint, the existing Map API is reused:
+
+```
+GET /api/maps/nearby?lat=<lat>&lng=<lng>&type=<type>
+```
+
+- Hospitals → `type=healthcare.hospital`
+- Police → `type=service.police`
+
+**Why reuse?**
+```
+TripMap ------\
+                → /api/maps/nearby → Geoapify
+Emergency ----/
+```
+Follows DRY, avoids duplicate backend logic, centralizes Geoapify integration, and is easier to maintain.
+
+> **Interview answer:** I reused the existing Map nearby-place API because both Map and Emergency need the same location-based search functionality. This avoids duplicate backend logic and follows DRY.
+
+---
+
+## 5. Backend Controller
+
+**File:** `backend/controllers/mapController.js`
+
+```javascript
+const { lat, lng, type } = req.query;
+
+if (!lat || !lng || !type) {
+  return res.status(400).json({
+    message: "Latitude, Longitude and Type are required."
+  });
+}
+```
+
+---
+
+## 6. Geoapify Integration
+
+Endpoint: `https://api.geoapify.com/v2/places`
+
+Request includes: category, lat, lng, radius, limit, API key.
+
+**API key security:**
+```
+backend/.env → process.env.GEOAPIFY_API_KEY → mapController → Geoapify
+```
+- Key stays on the backend only — never in `Emergency.jsx` / `TripMap.jsx`.
+- `.env` must be in `.gitignore`.
+
+**Search radius:** 25 km (Geoapify needs meters → `const radius = 25000;`)
+
+**Result limit:** Up to 50 places from backend; frontend shows only the nearest few to keep UI clean.
+
+---
+
+## 7. Backend Response Shape
+
+Geoapify's feature objects are simplified before sending to frontend:
+
+```javascript
+const places = data.features.map((item) => ({
+  id: item.properties.place_id,
+  lat: item.properties.lat,
+  lon: item.properties.lon,
+  name: item.properties.name || item.properties.address_line1
+}));
+```
+
+This decouples the frontend from Geoapify's raw response format.
+
+---
+
+## 8. Distance Calculation — Haversine
+
+For each resource, distance between user `(lat1, lng1)` and resource `(lat2, lng2)` is computed using the **Haversine formula** (great-circle distance).
+
+**Why not Euclidean distance?** Euclidean assumes a flat plane; lat/lng are coordinates on a curved Earth surface, so Haversine is more accurate.
+
+> **Interview answer:** I used Haversine because I needed the geographic distance between the user and nearby resources. Since input is lat/lng, Haversine is more appropriate than Euclidean distance.
+
+Then sorted nearest-first:
+```javascript
+places.sort((a, b) => a.distance - b.distance);
+```
+
+---
+
+## 9. Parallel Requests — `Promise.allSettled()`
+
+Hospital and police searches are independent, so both run in parallel:
+
+```javascript
+const results = await Promise.allSettled([
+  api.get("/maps/nearby", { params: { lat, lng, type: "healthcare.hospital" } }),
+  api.get("/maps/nearby", { params: { lat, lng, type: "service.police" } })
+]);
+```
+
+**Why not `Promise.all()`?** `Promise.all()` rejects the *entire* operation if even one request fails. `Promise.allSettled()` returns each result independently — a hospital failure won't hide a successful police result.
+
+> **Interview answer:** I used Promise.allSettled because hospital and police searches are independent. A failure in one should not block the successful result of the other.
+
+**Result handling:**
+```javascript
+// fulfilled
+setNearbyHospitals(hospitalResult.value.data.places || []);
+// rejected
+setNearbyHospitals([]); // error logged, page keeps working
+```
+Same pattern applies to police results.
+
+---
+
+## 10. Emergency Resource UI
+
+Two sections — **Hospitals** and **Police Stations** — each showing:
+- Name
+- Distance
+- "Get Directions" link
+
+Only the nearest few results are shown to avoid clutter.
+
+**Get Directions** generates a Google Maps URL from lat/lon:
+```
+https://www.google.com/maps/dir/?api=1&destination=<lat>,<lon>
+```
+Opens in a new tab.
+
+---
+
+## 11. Emergency Contact
+
+Stored on the existing `User` model:
+
+```javascript
+emergencyContact: {
+  name: String,
+  phone: String,
+  relation: String
+}
+```
+
+Available via `AuthContext` → current user → `emergencyContact`.
+
+If missing: `"No emergency contact has been added."` (user can add it from Profile).
+
+---
+
+## 12. One-Tap Calling
+
+Uses the HTML `tel:` URI — no backend call-processing needed:
+
+```jsx
+<a href={`tel:${user.emergencyContact.phone}`}>
+  Call Emergency Contact
+</a>
+```
+
+On supported mobile devices, this opens the dialer directly.
+
+---
+
+## 13. First Aid Guide
+
+**File:** `frontend/src/components/FirstAidGuide.jsx` (separated from `Emergency.jsx` for separation of concerns).
+
+**Categories:**
+- Common Emergencies (bleeding, cuts, burns, choking, CPR, fainting, shock)
+- Injuries (sprains, fractures, head injuries, nosebleeds, eye injuries, bites)
+- Travel Emergencies (heat exhaustion/stroke, dehydration, sunburn, hypothermia)
+- Other (allergic reactions, electric shock, seizures)
+
+> Basic guidance only — does not replace professional medical care.
+
+**Data structure:**
+```javascript
+const firstAidData = [
+  {
+    title: "Burns",
+    category: "Common Emergencies",
+    steps: [
+      "Move away from the heat source.",
+      "Cool the area with cool running water.",
+      "Do not apply ice directly.",
+      "Seek medical help for serious burns."
+    ]
+  }
+];
+```
+
+**Filtering:**
+```javascript
+firstAidData.filter(item => item.category === activeCategory);
+```
+
+**Why static?** First aid info is general, non-user-specific, and not trip-specific — so no API/DB call is needed. This is fast, easy to maintain, easy to cache, and sets up well for future offline support.
+
+---
+
+## 14. Error Handling Summary
+
+**Frontend:** unsupported geolocation, permission denied, position unavailable, timeout, API failure, empty results.
+
+**Backend:** missing lat/lng/type, Geoapify failure, invalid API key, external API errors.
+
+**Partial failure:** Hospital failure doesn't block police results, and vice versa — handled via `Promise.allSettled()`.
+
+---
+
+## 15. Separation of Responsibilities
+
+| File | Responsibility |
+|---|---|
+| `Emergency.jsx` | SOS, geolocation, nearby resources, emergency contact |
+| `FirstAidGuide.jsx` | First aid data, categories, filtering, UI |
+| `mapController.js` | Nearby-place API, Geoapify request, response transform, distance, sorting |
+| `mapRoutes.js` | `/api/maps/nearby` route |
+| `AuthContext.jsx` | Auth state, current user |
+| `User.js` | User data, emergency contact |
+
+---
+
+## 16. Architecture Diagram
+
+```
+                       TripMate
+                          |
+                  Emergency.jsx
+                          |
+       +------------------+------------------+
+       |                  |                  |
+       v                  v                  v
+      SOS          Nearby Resources   Emergency Contact
+       |                  |                  |
+       v                  v                  v
+ Geolocation          Map API             User Model
+       |                  |                  |
+       v                  v                  v
+  Lat + Lng           Geoapify            tel: URI
+                          |
+                  +-------+-------+
+                  |               |
+                  v               v
+              Hospitals        Police
+                  |               |
+                  +-------+-------+
+                          |
+                          v
+                  Haversine Distance
+                          |
+                          v
+                   Sort by Distance
+                          |
+                          v
+                       React UI
+
+                   FirstAidGuide → Static Data → Categories → First Aid Content
+```
+
+---
+
+## 17. Project Structure
+
+```
+frontend/
+└── src/
+    ├── pages/
+    │   └── Emergency.jsx
+    ├── components/
+    │   └── FirstAidGuide.jsx
+    ├── context/
+    │   └── AuthContext.jsx
+    └── api/
+        └── axios.js
+
+backend/
+├── controllers/
+│   └── mapController.js
+├── routes/
+│   └── mapRoutes.js
+└── models/
+    └── User.js
+```
+
+No new `emergencyRoutes.js` needed — the existing Map API is reused for nearby resources.
+
+---
+
+## 18. Testing Checklist
+
+- Emergency page loads at `/emergency`
+- SOS → browser asks for location permission → lat/lng obtained → nearby search starts
+- Hospitals: displayed with distance + directions
+- Police: displayed with distance + directions
+- Nearest resources appear first (e.g., 1.2 km, 2.4 km, 3.7 km, 5.1 km)
+- Partial failure: hospital fails → police still shown (and vice versa)
+- Emergency contact: name, relation, phone, call button shown if configured
+- First Aid: all category filters + individual topics work
+- Location denied → clear error, no crash
+- Geoapify failure → graceful error, no crash
+
+---
+
+## 19. Completion Checklist
+
+- [x] Emergency page + SOS button
+- [x] Browser Geolocation API + permission/error handling
+- [x] Nearby hospitals & police (Map API reused)
+- [x] Geoapify integration + secure API key handling
+- [x] 25 km radius, result limit
+- [x] Haversine distance + nearest-first sorting
+- [x] `Promise.allSettled()` for independent failure handling
+- [x] Google Maps directions
+- [x] Emergency contact + one-tap calling
+- [x] First Aid Guide with categories
+- [x] Full error handling + testing
+
+---
+
+## 20. Roadmap → Phase 11
+
+Phase 10 lays the groundwork for offline support:
+
+```
+Emergency Data (First Aid, Emergency Contact, Selected Trip)
+      ↓
+Service Worker / IndexedDB
+      ↓
+Local Cache
+      ↓
+Offline Access
+```
+
+Useful for travelers who lose connectivity in remote areas.
+
+---
+
+## Final Status: PHASE 10 — COMPLETE
+
+```
+SOS → Current Location → Nearby Search → Geoapify → Hospitals + Police
+   → Haversine Distance → Nearest-first Sort → Display → Get Directions
+
+Emergency Contact: User Profile → tel: URI → Phone Dialer
+First Aid: Categories → Topics → Safety Information
+```
