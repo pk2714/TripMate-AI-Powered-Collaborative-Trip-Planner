@@ -115,21 +115,25 @@ app.use("/api/users", userReviewRoutes);
 app.use("/api/emergency", emergencyRoutes);
 app.use("/api/chat", chatRoutes);// added (phase 8)
 
-// ── Serve React frontend in production ──
-if (IS_PROD) {
-  const distPath = path.join(__dirname, "..", "frontend", "dist");
+// ── Serve React frontend if it's built ──
+const fs = require("fs");
+const distPath = path.join(__dirname, "..", "frontend", "dist");
 
+if (fs.existsSync(distPath)) {
   // Serve static assets (JS, CSS, images, manifest, SW, etc.)
   app.use(express.static(distPath));
 
   // SPA catch-all — any non-API route returns index.html so client-side
   // routing (React Router) works on page refresh / direct navigation.
-  app.get("*", (req, res) => {
+  app.get("*", (req, res, next) => {
+    if (req.originalUrl.startsWith("/api")) {
+      return next();
+    }
     res.sendFile(path.join(distPath, "index.html"));
   });
 } else {
-  // In development the Vite dev server handles the frontend; this catch-all
-  // just avoids confusing 404 JSON for browser requests.
+  // In development, the Vite dev server handles the frontend.
+  // This catch-all avoids confusing 404 JSON for browser requests.
   app.use(notFound);
 }
 
