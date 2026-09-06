@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+*/node_modules/
+
+# Build output
+dist/
+frontend/dist/
+
+# Environment variables (secrets — never commit)
+.env
+backend/.env
+frontend/.env
+
+# Temporary upload directory
+backend/uploads/
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
