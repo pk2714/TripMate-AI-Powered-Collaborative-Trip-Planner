@@ -2,19 +2,17 @@ const crypto = require("crypto");
 const User = require("../models/User");
 const { asyncHandler } = require("../middleware/errorHandler");
 const { sendEmail } = require("../utils/sendEmail");
+const { checkString, checkEmail, checkPassword } = require("../utils/validate");
 
 // POST /api/auth/register
 const register = asyncHandler(async (req, res) => {
   const { name, email, password } = req.body;
 
-  if (!name || !email || !password) {
-    return res.status(400).json({ message: "Name, email and password are required." });
-  }
-  if (password.length < 8) {
-    return res.status(400).json({ message: "Password must be at least 8 characters." });
-  }
+  const error =
+    checkString(name, "Name", { min: 2, max: 50 }) || checkEmail(email) || checkPassword(password);
+  if (error) return res.status(400).json({ message: error });
 
-  const existing = await User.findOne({ email: email.toLowerCase() });
+  const existing = await User.findOne({ email: email.trim().toLowerCase() });
   if (existing) {
     return res.status(409).json({ message: "An account with that email already exists." });
   }
@@ -22,8 +20,8 @@ const register = asyncHandler(async (req, res) => {
   const verificationToken = crypto.randomBytes(32).toString("hex");
 
   const user = await User.create({
-    name,
-    email,
+    name: name.trim(),
+    email: email.trim(),
     password,
     emailVerificationToken: verificationToken,
     emailVerificationExpires: Date.now() + 24 * 60 * 60 * 1000, // 24h
@@ -78,7 +76,7 @@ const login = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: "Email and password are required." });
   }
 
-  const user = await User.findOne({ email: email.toLowerCase() }).select("+password");
+  const user = await User.findOne({ email: String(email).trim().toLowerCase() }).select("+password");
   if (!user || !(await user.comparePassword(password))) {
   return res.status(401).json({ message: "Invalid email or password." });
 }
@@ -114,7 +112,8 @@ const getMe = asyncHandler(async (req, res) => {
 // POST /api/auth/forgot-password
 const forgotPassword = asyncHandler(async (req, res) => {
   const { email } = req.body;
-  const user = await User.findOne({ email: email?.toLowerCase() });
+  if (checkEmail(email)) return res.status(400).json({ message: checkEmail(email) });
+  const user = await User.findOne({ email: email.trim().toLowerCase() });
 
   // Always respond the same way whether or not the email exists, to avoid
   // leaking which addresses are registered.
@@ -145,9 +144,11 @@ const forgotPassword = asyncHandler(async (req, res) => {
 // POST /api/auth/reset-password
 const resetPassword = asyncHandler(async (req, res) => {
   const { token, password } = req.body;
-  if (!token || !password) {
-    return res.status(400).json({ message: "Token and new password are required." });
+  if (!token || typeof token !== "string") {
+    return res.status(400).json({ message: "Invalid or expired reset link." });
   }
+  const pwError = checkPassword(password);
+  if (pwError) return res.status(400).json({ message: pwError });
 
   const user = await User.findOne({
     passwordResetToken: token,

@@ -1,80 +1,62 @@
 import { useState } from "react";
-import axios from "axios";
 import { Link } from "react-router-dom";
+import api from "../api/axios";
+import AuthLayout, { isValidEmail } from "../components/AuthLayout.jsx";
 
 export default function ForgotPassword() {
   const [email, setEmail] = useState("");
-  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  const [sent, setSent] = useState("");
   const [loading, setLoading] = useState(false);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    setError("");
+    if (!isValidEmail(email)) return setError("Enter a valid email address.");
 
     setLoading(true);
-    setMessage("");
-
     try {
-      const res = await axios.post("/api/auth/forgot-password", {
-        email,
-      });
-
-      setMessage(res.data.message);
+      const res = await api.post("/auth/forgot-password", { email: email.trim() });
+      setSent(res.data.message);
     } catch (err) {
-      setMessage(
-        err.response?.data?.message ||
-          "Something went wrong."
-      );
+      setError(err.response?.data?.message || "Something went wrong. Please try again.");
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="max-w-md mx-auto mt-16 p-8 bg-white rounded-xl shadow">
-      <h1 className="text-2xl font-bold mb-6">
-        Forgot Password
-      </h1>
-
-      {message && (
-        <p className="mb-4 text-green-600">
-          {message}
-        </p>
-      )}
-
-      <form
-        onSubmit={handleSubmit}
-        className="space-y-4"
-      >
-        <input
-          type="email"
-          placeholder="Enter your email"
-          required
-          value={email}
-          onChange={(e) =>
-            setEmail(e.target.value)
-          }
-          className="w-full px-3 py-2 border rounded-md"
-        />
-
-        <button
-          type="submit"
-          disabled={loading}
-          className="w-full py-2 rounded-md bg-brand-600 text-white"
-        >
-          {loading
-            ? "Sending..."
-            : "Send Reset Link"}
-        </button>
-      </form>
-
-      <div className="mt-4 text-center">
-        <Link
-          to="/login"
-          className="text-brand-600 hover:underline"
-        >
-          Back to Login
+    <AuthLayout
+      title="Forgot your password?"
+      subtitle="Enter your email and we'll send you a reset link."
+      footer={
+        <Link to="/login" className="font-semibold text-brand-600 hover:underline">
+          ← Back to log in
         </Link>
-      </div>
-    </div>
+      }
+    >
+      {sent ? (
+        <div className="alert-success">📬 {sent}</div>
+      ) : (
+        <form onSubmit={handleSubmit} noValidate className="space-y-5">
+          {error && <div className="alert-error">⚠️ {error}</div>}
+          <div>
+            <label htmlFor="email" className="label">Email</label>
+            <input
+              id="email"
+              type="email"
+              autoComplete="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="you@example.com"
+              className="input"
+            />
+          </div>
+          <button type="submit" disabled={loading} className="btn-primary w-full py-3">
+            {loading ? "Sending…" : "Send reset link"}
+          </button>
+        </form>
+      )}
+    </AuthLayout>
   );
 }

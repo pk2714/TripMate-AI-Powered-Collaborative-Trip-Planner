@@ -189,19 +189,19 @@ export default function ChatBot() {
   };
 
   return (
-    <div className="fixed bottom-6 right-6 z-50 font-sans">
+    <div className="fixed bottom-4 right-4 sm:bottom-6 sm:right-6 z-50 font-sans">
       {/* Floating Action Button when closed */}
       {!isOpen && (
         <button
           onClick={() => setIsOpen(true)}
-          className="group flex items-center gap-2.5 px-4 py-3 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white rounded-full shadow-2xl hover:shadow-indigo-500/40 transition-all duration-300 transform hover:scale-105"
+          className="group flex items-center gap-2.5 p-3.5 sm:px-4 sm:py-3 bg-gradient-to-r from-brand-600 to-teal-500 hover:from-brand-700 hover:to-teal-600 text-white rounded-full shadow-2xl shadow-brand-600/30 transition-all duration-300 transform hover:scale-105"
           aria-label="Open TripMate AI Assistant"
         >
           <span className="text-2xl animate-pulse">🤖</span>
-          <span className="font-semibold text-sm tracking-wide">
+          <span className="hidden sm:inline font-semibold text-sm tracking-wide">
             Ask TripMate AI
           </span>
-          <span className="w-2.5 h-2.5 bg-green-400 rounded-full animate-ping mr-0.5" />
+          <span className="hidden sm:block w-2.5 h-2.5 bg-green-300 rounded-full animate-ping mr-0.5" />
         </button>
       )}
 
@@ -215,7 +215,7 @@ export default function ChatBot() {
           }`}
         >
           {/* Header */}
-          <div className="flex items-center justify-between px-4 py-3.5 bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 text-white select-none">
+          <div className="flex items-center justify-between px-4 py-3.5 bg-gradient-to-r from-brand-700 via-brand-600 to-teal-500 text-white select-none">
             <div className="flex items-center gap-3">
               <div className="w-9 h-9 rounded-full bg-white/20 backdrop-blur flex items-center justify-center text-xl">
                 🤖
@@ -227,7 +227,7 @@ export default function ChatBot() {
                     Online
                   </span>
                 </div>
-                <p className="text-xs text-blue-100 opacity-90">
+                <p className="text-xs text-brand-50 opacity-90">
                   {tripContext?.destination
                     ? `Trip context: ${tripContext.destination}`
                     : "Your 24/7 AI Travel Companion"}
@@ -275,14 +275,14 @@ export default function ChatBot() {
                     <div
                       className={`max-w-[85%] rounded-2xl px-4 py-2.5 text-sm shadow-sm ${
                         m.role === "user"
-                          ? "bg-blue-600 text-white rounded-br-none"
+                          ? "bg-brand-600 text-white rounded-br-none"
                           : m.isError
                           ? "bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-300 rounded-bl-none"
                           : "bg-white dark:bg-gray-800 text-gray-800 dark:text-gray-100 border border-gray-100 dark:border-gray-700 rounded-bl-none"
                       }`}
                     >
                       {m.role === "assistant" && (
-                        <div className="flex items-center gap-1.5 mb-1 text-[11px] font-semibold text-blue-600 dark:text-blue-400">
+                        <div className="flex items-center gap-1.5 mb-1 text-[11px] font-semibold text-brand-600 dark:text-brand-300">
                           <span>✨ TripMate AI</span>
                         </div>
                       )}
@@ -299,9 +299,9 @@ export default function ChatBot() {
                   <div className="flex items-start gap-2">
                     <div className="bg-white dark:bg-gray-800 border border-gray-100 dark:border-gray-700 rounded-2xl rounded-bl-none px-4 py-3 shadow-sm">
                       <div className="flex items-center gap-1.5">
-                        <span className="w-2 h-2 rounded-full bg-blue-600 animate-bounce" />
-                        <span className="w-2 h-2 rounded-full bg-indigo-600 animate-bounce [animation-delay:0.2s]" />
-                        <span className="w-2 h-2 rounded-full bg-purple-600 animate-bounce [animation-delay:0.4s]" />
+                        <span className="w-2 h-2 rounded-full bg-brand-600 animate-bounce" />
+                        <span className="w-2 h-2 rounded-full bg-brand-500 animate-bounce [animation-delay:0.2s]" />
+                        <span className="w-2 h-2 rounded-full bg-teal-500 animate-bounce [animation-delay:0.4s]" />
                         <span className="text-xs text-gray-400 ml-2">TripMate is thinking...</span>
                       </div>
                     </div>
@@ -317,7 +317,7 @@ export default function ChatBot() {
                     <button
                       key={idx}
                       onClick={() => handleSend(q)}
-                      className="text-xs px-2.5 py-1 rounded-full bg-gray-100 dark:bg-gray-800 hover:bg-blue-50 hover:text-blue-600 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300 transition border border-gray-200 dark:border-gray-700"
+                      className="text-xs px-2.5 py-1 rounded-full bg-gray-100 dark:bg-gray-800 hover:bg-brand-50 hover:text-brand-700 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300 transition border border-gray-200 dark:border-gray-700"
                     >
                       {q}
                     </button>
@@ -342,12 +342,12 @@ export default function ChatBot() {
                     onKeyDown={handleKeyDown}
                     placeholder="Ask about destinations, budget, packing..."
                     disabled={loading}
-                    className="flex-1 px-3.5 py-2.5 text-sm rounded-xl border border-gray-300 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+                    className="flex-1 px-3.5 py-2.5 text-sm rounded-xl border border-gray-300 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-brand-500 disabled:opacity-50"
                   />
                   <button
                     type="submit"
                     disabled={!input.trim() || loading}
-                    className="p-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-40 disabled:hover:bg-blue-600 shadow-md transition transform active:scale-95"
+                    className="p-2.5 rounded-xl bg-brand-600 hover:bg-brand-700 text-white disabled:opacity-40 disabled:hover:bg-brand-600 shadow-md transition transform active:scale-95"
                     title="Send Message"
                   >
                     <svg

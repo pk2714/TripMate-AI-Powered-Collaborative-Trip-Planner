@@ -1,33 +1,67 @@
 import { useEffect, useState, useCallback, useRef } from "react";
-import { useParams } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
 import { io } from "socket.io-client";
 import api from "../api/axios";
 import { useAuth } from "../context/AuthContext.jsx";
 import { useChatBot } from "../context/ChatBotContext.jsx";
 import TripMap from "../components/TripMap";
-import { saveTrip, getTrip} from "../utils/db";
-
-
+import TripStatusBadge from "../components/TripStatusBadge.jsx";
+import { saveTrip, getTrip } from "../utils/db";
+import { formatDate, formatDateRange, formatINR, getTripPhase, tripDays } from "../utils/trip.js";
 
 // One socket per mounted TripDetails page. In dev, Vite's proxy only covers
 // HTTP requests, so Socket.IO connects straight to the backend origin.
-// In production the frontend is served by Express from the same origin,
-// so Socket.IO connects to window.location.origin. In dev, fall back to
-// the local backend server.
+// In production the frontend is served by Express from the same origin.
 const SOCKET_URL = import.meta.env.VITE_API_URL
   ? import.meta.env.VITE_API_URL.replace(/\/api$/, "")
   : import.meta.env.DEV
     ? "http://localhost:5000"
     : window.location.origin;
 
+const LOCATION_MIN_INTERVAL_MS = 4000;
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+const MAX_EXPENSE = 10_000_000;
+
+const TABS = [
+  { key: "overview", label: "Overview", icon: "🧭" },
+  { key: "ai", label: "AI Plan", icon: "✨" },
+  { key: "chat", label: "Chat", icon: "💬", membersOnly: true },
+  { key: "expenses", label: "Expenses", icon: "💰", membersOnly: true },
+  { key: "map", label: "Map", icon: "🗺️" },
+];
+
+function validateExpense(form, { needsMembers = false, selected = [] } = {}) {
+  const description = form.description.trim();
+  const amount = Number(form.amount);
+  if (description.length < 2) return "Description must be at least 2 characters.";
+  if (description.length > 120) return "Description must be at most 120 characters.";
+  if (form.amount === "" || !Number.isFinite(amount) || amount < 1) return "Amount must be at least ₹1.";
+  if (amount > MAX_EXPENSE) return "Amount looks too large.";
+  if (needsMembers && selected.length === 0) return "Select at least one member to split with.";
+  return null;
+}
+
+const Avatar = ({ name, size = "h-9 w-9 text-sm" }) => (
+  <span
+    className={`flex shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-brand-500 to-teal-400 font-bold text-white ${size}`}
+  >
+    {(name || "?").charAt(0).toUpperCase()}
+  </span>
+);
+
 export default function TripDetails() {
   const { id } = useParams();
   const { user } = useAuth();
+  const { setTripContext } = useChatBot();
 
   const [trip, setTrip] = useState(null);
   const [members, setMembers] = useState([]);
   const [myMembership, setMyMembership] = useState(null);
-  const [tab, setTab] = useState("overview"); // overview | ai | chat | expenses
+  const [loadError, setLoadError] = useState("");
+  const [fromCache, setFromCache] = useState(false);
+  const [tab, setTab] = useState("overview");
+  const [notice, setNotice] = useState(null); // { type, text }
+  const [busy, setBusy] = useState(false);
 
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState("");
@@ -35,90 +69,102 @@ export default function TripDetails() {
   const [messages, setMessages] = useState([]);
   const [messageText, setMessageText] = useState("");
   const [selectedImage, setSelectedImage] = useState(null);
+  const [chatError, setChatError] = useState("");
+  const [sending, setSending] = useState(false);
+  const fileInputRef = useRef(null);
+  const messagesEndRef = useRef(null);
+
   const [liveLocations, setLiveLocations] = useState({});
   const [isSharingLocation, setIsSharingLocation] = useState(false);
   const [locationError, setLocationError] = useState("");
-  const [socket, setSocket] = useState(null);
   const socketRef = useRef(null);
   const watchIdRef = useRef(null);
   const lastSentRef = useRef(0);
   const lastPositionRef = useRef(null);
 
-  const { setTripContext } = useChatBot();
-
   const [expenses, setExpenses] = useState([]);
   const [summary, setSummary] = useState([]);
   const [expenseForm, setExpenseForm] = useState({ description: "", amount: "" });
+  const [expenseError, setExpenseError] = useState("");
+  const [customExpenseForm, setCustomExpenseForm] = useState({ description: "", amount: "" });
+  const [customExpenseError, setCustomExpenseError] = useState("");
+  const [selectedMembers, setSelectedMembers] = useState([]);
+  const [customExpenses, setCustomExpenses] = useState([]);
+  const [customSummary, setCustomSummary] = useState([]);
 
-  const [customExpenseForm, setCustomExpenseForm] = useState({
-  description: "",
-  amount: "",
-});
-
-const [selectedMembers, setSelectedMembers] = useState([]);
-
-const [customExpenses, setCustomExpenses] = useState([]);
-
-const [customSummary, setCustomSummary] = useState([]);
-
-const loadTrip = useCallback(async () => {
-  try {
-    // First try the server
-    const res = await api.get(`/trips/${id}`);
-
-    const tripData = {
-      id: res.data.trip._id,
-      trip: res.data.trip,
-      members: res.data.members,
-      myMembership: res.data.myMembership,
-    };
-
-    // Save successful response for offline use
-    await saveTrip(tripData);
-
-    setTrip(res.data.trip);
-    setMembers(res.data.members);
-    setMyMembership(res.data.myMembership);
-  } catch (err) {
-    console.error("Failed to load trip from server:", err);
-
-    // Internet/API failed → try IndexedDB
+  // --- Loading ---
+  const loadTrip = useCallback(async () => {
     try {
-      const cachedTrip = await getTrip(id);
-
-      if (cachedTrip) {
-        console.log("Loading trip from IndexedDB");
-
-        setTrip(cachedTrip.trip);
-        setMembers(cachedTrip.members || []);
-        setMyMembership(cachedTrip.myMembership || null);
-      } else {
-        console.error("No cached trip available");
+      const res = await api.get(`/trips/${id}`);
+      await saveTrip({
+        id: res.data.trip._id,
+        trip: res.data.trip,
+        members: res.data.members,
+        myMembership: res.data.myMembership,
+      }).catch(() => {});
+      setTrip(res.data.trip);
+      setMembers(res.data.members);
+      setMyMembership(res.data.myMembership);
+      setFromCache(false);
+      setLoadError("");
+    } catch (err) {
+      console.error("Failed to load trip from server:", err);
+      const status = err.response?.status;
+      if (status === 404 || status === 400) {
+        setLoadError("This trip doesn't exist or has been deleted.");
+        return;
       }
-    } catch (dbErr) {
-      console.error("Failed to load cached trip:", dbErr);
+      // Network problem → fall back to the copy saved for offline use.
+      const cached = await getTrip(id).catch(() => null);
+      if (cached) {
+        setTrip(cached.trip);
+        setMembers(cached.members || []);
+        setMyMembership(cached.myMembership || null);
+        setFromCache(true);
+      } else {
+        setLoadError("Couldn't load this trip. Check your connection and try again.");
+      }
     }
-  }
-}, [id]);
+  }, [id]);
 
-      const loadMessages = useCallback(async () => {
-  try {
-    const res = await api.get(`/chat/${id}/messages`);
-    setMessages(res.data);
-  } catch (err) {
-    console.error("Failed to load messages", err);
-  }
-}, [id]);
+  const loadMessages = useCallback(async () => {
+    try {
+      const res = await api.get(`/chat/${id}/messages`);
+      setMessages(res.data);
+    } catch (err) {
+      console.error("Failed to load messages", err);
+    }
+  }, [id]);
 
- useEffect(() => {
-  loadTrip();
-}, [loadTrip]);
+  const loadExpenses = useCallback(async () => {
+    try {
+      const [commonExp, commonSummary, customExp, customSummaryRes] = await Promise.all([
+        api.get(`/trips/${id}/expenses?expenseType=common`),
+        api.get(`/trips/${id}/expenses/summary?expenseType=common`),
+        api.get(`/trips/${id}/expenses?expenseType=custom`),
+        api.get(`/trips/${id}/expenses/summary?expenseType=custom`),
+      ]);
+      setExpenses(commonExp.data.expenses);
+      setSummary(commonSummary.data.summary);
+      setCustomExpenses(customExp.data.expenses);
+      setCustomSummary(customSummaryRes.data.summary);
+    } catch (err) {
+      console.error("Failed to load expenses", err);
+    }
+  }, [id]);
 
-useEffect(() => {
-  if (tab === "chat") {
-    loadMessages();
-  }
-}, [tab, loadMessages]);
+  useEffect(() => {
+    loadTrip();
+  }, [loadTrip]);
+
+  useEffect(() => {
+    if (tab === "chat") loadMessages();
+    if (tab === "expenses") loadExpenses();
+  }, [tab, loadMessages, loadExpenses]);
+
+  useEffect(() => {
+    if (tab === "chat") messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }, [messages, tab]);
 
   // Give the floating AI assistant context about the trip being viewed.
   useEffect(() => {
@@ -138,7 +184,6 @@ useEffect(() => {
 
     s.on("newMessage", (msg) => setMessages((prev) => [...prev, msg]));
 
-    // Everyone already sharing when we join.
     // Arrives once joinTrip succeeds. If we were sharing before a reconnect,
     // the server dropped our location, so resend the last known position.
     s.on("locationSnapshot", (list) => {
@@ -163,7 +208,6 @@ useEffect(() => {
 
     s.on("errorMessage", (msg) => console.warn("Socket:", msg));
 
-    setSocket(s);
     return () => {
       s.emit("leaveTrip", { tripId: id });
       s.disconnect();
@@ -187,8 +231,6 @@ useEffect(() => {
       setIsSharingLocation(false);
     };
   }, [id]);
-
-  const LOCATION_MIN_INTERVAL_MS = 4000;
 
   const startSharingLocation = () => {
     setLocationError("");
@@ -216,7 +258,6 @@ useEffect(() => {
         const now = Date.now();
         if (now - lastSentRef.current < LOCATION_MIN_INTERVAL_MS) return;
         lastSentRef.current = now;
-
         socketRef.current?.emit("shareLocation", { tripId: id, ...lastPositionRef.current });
       },
       (error) => {
@@ -230,11 +271,7 @@ useEffect(() => {
         );
         stopSharingLocation();
       },
-      {
-        enableHighAccuracy: true,
-        timeout: 20000,
-        maximumAge: 5000,
-      }
+      { enableHighAccuracy: true, timeout: 20000, maximumAge: 5000 }
     );
   };
 
@@ -251,49 +288,55 @@ useEffect(() => {
     }
   };
 
-  const toggleLocationSharing = () => {
-    if (isSharingLocation) {
-      stopSharingLocation();
-    } else {
-      startSharingLocation();
+  const toggleLocationSharing = () => (isSharingLocation ? stopSharingLocation() : startSharingLocation());
+
+  // --- Chat ---
+  const handleImagePick = (e) => {
+    const file = e.target.files[0] || null;
+    setChatError("");
+    if (file && !file.type.startsWith("image/")) {
+      setChatError("Only image files can be shared.");
+      e.target.value = "";
+      return;
     }
+    if (file && file.size > MAX_IMAGE_BYTES) {
+      setChatError("Image must be 5 MB or smaller.");
+      e.target.value = "";
+      return;
+    }
+    setSelectedImage(file);
   };
 
   const sendMessage = async (e) => {
     e.preventDefault();
+    setChatError("");
+    const text = messageText.trim();
+    if (!text && !selectedImage) return;
+    if (text.length > 2000) return setChatError("Messages can be at most 2000 characters.");
+    if (!socketRef.current?.connected) return setChatError("Not connected to chat. Please wait a moment.");
 
+    setSending(true);
     let imageUrl = "";
-
-    if (selectedImage) {
-      try {
+    try {
+      if (selectedImage) {
         const formData = new FormData();
         formData.append("image", selectedImage);
-
         const res = await api.post("/chat/upload", formData, {
-          headers: {
-            "Content-Type": "multipart/form-data",
-          },
+          headers: { "Content-Type": "multipart/form-data" },
         });
-
         imageUrl = res.data?.imageUrl || "";
-      } catch (err) {
-        console.error("Image upload failed:", err);
       }
+
+      socketRef.current.emit("sendMessage", { tripId: id, text, mediaUrl: imageUrl });
+      setMessageText("");
+      setSelectedImage(null);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    } catch (err) {
+      setChatError(err.response?.data?.message || "Image upload failed. Please try again.");
+    } finally {
+      setSending(false);
     }
-
-    if ((!messageText.trim() && !imageUrl) || !socket) return;
-
-    socket.emit("sendMessage", {
-      tripId: id,
-      text: messageText,
-      type: imageUrl ? "image" : "text",
-      mediaUrl: imageUrl,
-    });
-
-    setMessageText("");
-    setSelectedImage(null);
   };
-
 
   // --- AI itinerary ---
   const generateItinerary = async () => {
@@ -303,394 +346,501 @@ useEffect(() => {
       const res = await api.post(`/ai/trips/${id}/itinerary`, {});
       setTrip((prev) => ({ ...prev, aiItinerary: res.data.aiItinerary }));
     } catch (err) {
-      setAiError(
-        err.response?.data?.message ||
-          "Could not generate itinerary. Make sure GEMINI_API_KEY is set on the backend."
-      );
+      setAiError(err.response?.data?.message || "Could not generate the itinerary. Please try again.");
     } finally {
       setAiLoading(false);
     }
   };
 
-  // --- Join requests (organizer only) ---
+  // --- Join requests ---
   const respondToRequest = async (memberId, status) => {
-    await api.patch(`/trips/${id}/members/${memberId}`, { status });
-    loadTrip();
+    setNotice(null);
+    setBusy(true);
+    try {
+      await api.patch(`/trips/${id}/members/${memberId}`, { status });
+      setNotice({ type: "success", text: status === "accepted" ? "Request accepted." : "Request declined." });
+      await loadTrip();
+    } catch (err) {
+      setNotice({ type: "error", text: err.response?.data?.message || "Something went wrong." });
+    } finally {
+      setBusy(false);
+    }
   };
 
- const requestToJoin = async () => {
-  console.log("Button clicked");
-
-  try {
-    const res = await api.post(`/trips/${id}/join`);
-
-    console.log(res.data);
-
-    alert("Join request sent");
-
-    loadTrip();
-  } catch (err) {
-    console.error(err);
-
-    alert(err.response?.data?.message || "Something went wrong");
-  }
-};
+  const requestToJoin = async () => {
+    setNotice(null);
+    setBusy(true);
+    try {
+      await api.post(`/trips/${id}/join`);
+      setNotice({ type: "success", text: "Join request sent! The organizer will review it." });
+      await loadTrip();
+    } catch (err) {
+      setNotice({ type: "error", text: err.response?.data?.message || "Something went wrong." });
+    } finally {
+      setBusy(false);
+    }
+  };
 
   // --- Expenses ---
- const loadExpenses = useCallback(async () => {
-  const [
-    commonExp,
-    commonSummary,
-    customExp,
-    customSummaryRes,
-  ] = await Promise.all([
-    api.get(`/trips/${id}/expenses?expenseType=common`),
-    api.get(`/trips/${id}/expenses/summary?expenseType=common`),
-    api.get(`/trips/${id}/expenses?expenseType=custom`),
-    api.get(`/trips/${id}/expenses/summary?expenseType=custom`),
-  ]);
+  const addExpense = async (e) => {
+    e.preventDefault();
+    const error = validateExpense(expenseForm);
+    setExpenseError(error || "");
+    if (error) return;
+    try {
+      await api.post(`/trips/${id}/expenses`, {
+        description: expenseForm.description.trim(),
+        amount: Number(expenseForm.amount),
+        expenseType: "common",
+      });
+      setExpenseForm({ description: "", amount: "" });
+      await loadExpenses();
+    } catch (err) {
+      setExpenseError(err.response?.data?.message || "Could not add the expense.");
+    }
+  };
 
-  setExpenses(commonExp.data.expenses);
-  setSummary(commonSummary.data.summary);
+  const addCustomExpense = async (e) => {
+    e.preventDefault();
+    const error = validateExpense(customExpenseForm, { needsMembers: true, selected: selectedMembers });
+    setCustomExpenseError(error || "");
+    if (error) return;
+    try {
+      await api.post(`/trips/${id}/expenses`, {
+        description: customExpenseForm.description.trim(),
+        amount: Number(customExpenseForm.amount),
+        splitBetween: selectedMembers,
+        expenseType: "custom",
+      });
+      setCustomExpenseForm({ description: "", amount: "" });
+      setSelectedMembers([]);
+      await loadExpenses();
+    } catch (err) {
+      setCustomExpenseError(err.response?.data?.message || "Could not add the expense.");
+    }
+  };
 
-  setCustomExpenses(customExp.data.expenses);
-  setCustomSummary(customSummaryRes.data.summary);
-}, [id]);
+  // --- Render ---
+  if (loadError) {
+    return (
+      <div className="mx-auto max-w-lg px-4 py-20 text-center">
+        <div className="text-5xl">🧭</div>
+        <h1 className="mt-4 text-2xl font-bold">Trip not available</h1>
+        <p className="mt-2 text-slate-500">{loadError}</p>
+        <Link to="/dashboard" className="btn-primary mt-6">
+          Back to trips
+        </Link>
+      </div>
+    );
+  }
 
-  useEffect(() => {
-    if (tab === "expenses") loadExpenses();
-  }, [tab, loadExpenses]);
+  if (!trip) {
+    return (
+      <div className="mx-auto max-w-5xl animate-pulse px-4 py-10">
+        <div className="card h-48" />
+        <div className="mt-6 h-10 w-2/3 rounded-xl bg-slate-200 dark:bg-slate-800" />
+        <div className="card mt-6 h-64" />
+      </div>
+    );
+  }
 
- const addExpense = async (e) => {
-  e.preventDefault();
-
-  await api.post(`/trips/${id}/expenses`, {
-    description: expenseForm.description,
-    amount: Number(expenseForm.amount),
-    expenseType: "common",
-  });
-
-  setExpenseForm({ description: "", amount: "" });
-        await loadExpenses();
-};
-
-
-      const addCustomExpense = async (e) => {
-  e.preventDefault();
-
-  if (selectedMembers.length === 0) {
-  alert("Select at least one member");
-  return;
-}
-
-  await api.post(`/trips/${id}/expenses`, {
-    description: customExpenseForm.description,
-    amount: Number(customExpenseForm.amount),
-    splitBetween: selectedMembers,
-    expenseType: "custom",
-  });
-
-  setCustomExpenseForm({
-    description: "",
-    amount: "",
-  });
-
-  setSelectedMembers([]);
-
-  await loadExpenses();
-};
-
-  if (!trip) return <p className="p-8 text-center">Loading trip...</p>;
-
+  const phase = getTripPhase(trip);
+  const days = tripDays(trip);
   const isOrganizer = user && trip.organizer?._id === user._id;
-  const isMember =  myMembership?.status === "accepted";
-  const pendingRequests = members.filter(
-  (member) => member.status === "requested"
-);
+  const isMember = myMembership?.status === "accepted";
+  const pendingRequests = members.filter((m) => m.status === "requested");
+  const acceptedMembers = members.filter((m) => m.status === "accepted");
+  const isFull = acceptedMembers.length >= trip.maxMembers;
+  const canRequestJoin =
+    user && !isOrganizer && (!myMembership || myMembership.status === "left") && phase.isActive && !isFull;
+  const visibleTabs = TABS.filter((t) => !t.membersOnly || isMember);
+  const total = (list) => list.reduce((sum, e) => sum + e.amount, 0);
 
-const acceptedMembers = members.filter(
-  (member) => member.status === "accepted"
-);
+  const heroGradient =
+    phase.key === "completed"
+      ? "from-red-700 via-rose-600 to-orange-500"
+      : phase.key === "cancelled"
+      ? "from-slate-700 via-slate-600 to-slate-500"
+      : "from-brand-700 via-brand-600 to-teal-500";
 
   return (
-    <div className="max-w-4xl mx-auto mt-8 px-4">
-      <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-6">
-        <div className="flex justify-between items-start">
-          <div>
-            <h1 className="text-2xl font-bold">{trip.title}</h1>
-            <p className="text-gray-500">📍 {trip.destination}</p>
+    <div className="mx-auto max-w-5xl px-4 py-8 sm:px-6">
+      <Link to="/dashboard" className="text-sm font-medium text-slate-500 hover:text-brand-600">
+        ← All trips
+      </Link>
+
+      {fromCache && (
+        <div className="alert-info mt-4">📴 You're viewing a saved copy of this trip. Some data may be out of date.</div>
+      )}
+
+      {/* Hero */}
+      <section className={`mt-4 overflow-hidden rounded-3xl bg-gradient-to-br ${heroGradient} text-white shadow-xl`}>
+        <div className="p-6 sm:p-8">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="badge bg-white/20 text-white backdrop-blur">
+              <span className={`h-2 w-2 rounded-full ${phase.isActive ? "bg-emerald-300" : "bg-white"}`} />
+              {phase.label}
+            </span>
+            <span className="text-sm font-medium text-white/80">{phase.detail}</span>
           </div>
-          {!isOrganizer && !isMember && user && (
-            <button
-              onClick={requestToJoin}
-              className="px-4 py-2 rounded-md bg-brand-600 text-white hover:bg-brand-700"
-            >
-              Request to join
-            </button>
-          )}
-   {myMembership?.status === "requested" && (
-      <span className="text-yellow-600 font-medium">
-        ⏳ Join Request Pending
-      </span>
-    )}
 
-    {myMembership?.status === "rejected" && (
-      <span className="text-red-600 font-medium">
-        ❌ Join Request Rejected
-      </span>
-    )}
-           
-        </div>
+          <h1 className="mt-3 text-3xl font-extrabold tracking-tight sm:text-4xl">{trip.title}</h1>
+          <p className="mt-1 text-lg text-white/90">📍 {trip.destination}</p>
 
-        <div className="flex gap-4 mt-3 text-sm text-gray-500">
-          <span>{new Date(trip.startDate).toLocaleDateString()} – {new Date(trip.endDate).toLocaleDateString()}</span>
-          <span>Budget ₹{trip.budget}</span>
-         <span>{acceptedMembers.length}/{trip.maxMembers} members</span>
+          <dl className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
+            {[
+              ["Dates", formatDateRange(trip.startDate, trip.endDate)],
+              ["Duration", `${days} day${days > 1 ? "s" : ""}`],
+              ["Budget", formatINR(trip.budget)],
+              ["Members", `${acceptedMembers.length}/${trip.maxMembers}${isFull ? " · Full" : ""}`],
+            ].map(([k, v]) => (
+              <div key={k} className="rounded-2xl bg-white/15 px-4 py-3 backdrop-blur">
+                <dt className="text-[11px] font-semibold uppercase tracking-wider text-white/70">{k}</dt>
+                <dd className="mt-0.5 font-bold">{v}</dd>
+              </div>
+            ))}
+          </dl>
+
+          <div className="mt-6 flex flex-wrap items-center gap-3">
+            <span className="text-sm text-white/80">
+              Organized by <strong className="text-white">{trip.organizer?.name || "Unknown"}</strong>
+              {trip.organizer?.verificationStatus === "verified" && " ✔"}
+            </span>
+            <div className="ml-auto flex flex-wrap gap-2">
+              {canRequestJoin && (
+                <button onClick={requestToJoin} disabled={busy} className="btn bg-white text-brand-700 shadow hover:bg-brand-50">
+                  {busy ? "Sending…" : "🙋 Request to join"}
+                </button>
+              )}
+              {!user && phase.isActive && (
+                <Link to="/login" state={{ from: `/trips/${id}` }} className="btn bg-white text-brand-700 hover:bg-brand-50">
+                  Log in to join
+                </Link>
+              )}
+              {myMembership?.status === "requested" && (
+                <span className="badge bg-amber-100 px-3 py-2 text-amber-800">⏳ Join request pending</span>
+              )}
+              {myMembership?.status === "rejected" && (
+                <span className="badge bg-white/90 px-3 py-2 text-red-700">✖ Join request declined</span>
+              )}
+              {isMember && !isOrganizer && <span className="badge bg-white/20 px-3 py-2 text-white">✔ You're a member</span>}
+              {isOrganizer && <span className="badge bg-white/20 px-3 py-2 text-white">★ You're the organizer</span>}
+            </div>
+          </div>
         </div>
-      </div>
+      </section>
+
+      {/* Outdated / full banners */}
+      {phase.key === "completed" && (
+        <div className="alert-error mt-4">
+          ⛔ <span>
+            This trip ended on <strong>{formatDate(trip.endDate)}</strong>. It's marked as completed and no longer
+            accepts new members.
+          </span>
+        </div>
+      )}
+      {phase.key === "cancelled" && <div className="alert mt-4 border-slate-200 bg-slate-100 text-slate-700">This trip was cancelled.</div>}
+      {phase.isActive && isFull && !isMember && !isOrganizer && (
+        <div className="alert mt-4 border-orange-200 bg-orange-50 text-orange-800">👥 This trip is full.</div>
+      )}
+      {notice && (
+        <div className={`mt-4 ${notice.type === "success" ? "alert-success" : "alert-error"}`}>
+          {notice.type === "success" ? "✅" : "⚠️"} {notice.text}
+        </div>
+      )}
 
       {/* Tabs */}
-      <div className="flex gap-2 mt-6 border-b dark:border-gray-700">
-        {[
-         "overview",
-            "ai",
-  ...(isMember ? ["chat", "expenses", "map"] : ["map"]),
-   ].map((t) => (
-          <button
-            key={t}
-            onClick={() => setTab(t)}
-            className={`px-4 py-2 capitalize ${
-              tab === t ? "border-b-2 border-brand-600 text-brand-600" : "text-gray-500"
-            }`}
-          >
-            {t}
-          </button>
-        ))}
+      <div className="sticky top-16 z-30 -mx-4 mt-6 bg-slate-50/90 px-4 py-2 backdrop-blur dark:bg-slate-950/90 sm:mx-0 sm:px-0">
+        <div className="flex gap-1 overflow-x-auto rounded-2xl bg-white p-1 shadow-sm ring-1 ring-slate-200 dark:bg-slate-900 dark:ring-slate-800">
+          {visibleTabs.map((t) => (
+            <button
+              key={t.key}
+              onClick={() => setTab(t.key)}
+              className={`flex flex-1 items-center justify-center gap-1.5 whitespace-nowrap rounded-xl px-3 py-2.5 text-sm font-semibold transition ${
+                tab === t.key
+                  ? "bg-brand-600 text-white shadow"
+                  : "text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
+              }`}
+            >
+              <span aria-hidden>{t.icon}</span>
+              {t.label}
+              {t.key === "overview" && isOrganizer && pendingRequests.length > 0 && (
+                <span className="rounded-full bg-amber-400 px-1.5 text-[10px] font-bold text-amber-950">
+                  {pendingRequests.length}
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
       </div>
 
-      {/* Overview: members + join requests */}
+      {/* Overview */}
       {tab === "overview" && (
-        <div className="mt-4 space-y-4">
-          <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-6">
-            <h2 className="font-semibold mb-3">Members</h2>
-            <ul className="space-y-2">
+        <div className="mt-4 grid gap-4 md:grid-cols-2">
+          <div className="card card-pad">
+            <div className="flex items-center justify-between">
+              <h2 className="section-title">Members</h2>
+              <span className="text-sm text-slate-500">
+                {acceptedMembers.length}/{trip.maxMembers}
+              </span>
+            </div>
+            <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
+              <div
+                className={`h-full rounded-full ${isFull ? "bg-orange-500" : "bg-brand-500"}`}
+                style={{ width: `${Math.min(100, (acceptedMembers.length / trip.maxMembers) * 100)}%` }}
+              />
+            </div>
+            <ul className="mt-4 divide-y divide-slate-100 dark:divide-slate-800">
               {acceptedMembers.map((m) => (
-                <li key={m._id} className="flex items-center justify-between">
-                  <span>{m.user?.name}</span>
+                <li key={m._id} className="flex items-center gap-3 py-2.5">
+                  <Avatar name={m.user?.name} />
+                  <span className="flex-1 font-medium">
+                    {m.user?.name}
+                    {m.user?._id === user?._id && <span className="text-slate-400"> (you)</span>}
+                  </span>
+                  {m.user?.verificationStatus === "verified" && (
+                    <span className="badge bg-emerald-50 px-2 py-0.5 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-300">✔ Verified</span>
+                  )}
                   {m.role === "organizer" && (
-                    <span className="text-xs text-brand-600">Organizer</span>
+                    <span className="badge bg-brand-600 px-2 py-0.5 text-white">Organizer</span>
                   )}
                 </li>
               ))}
             </ul>
           </div>
 
-         {isOrganizer && (
-  <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-6">
-    <h2 className="font-semibold mb-3">
-      Pending Join Requests
-    </h2>
-
-    {pendingRequests.length === 0 ? (
-      <p className="text-gray-500 text-sm">
-        No pending requests.
-      </p>
-    ) : (
-      <ul className="space-y-3">
-        {pendingRequests.map((member) => (
-          <li
-            key={member._id}
-            className="flex items-center justify-between"
-          >
-            <span>{member.user?.name}</span>
-
-            <div className="flex gap-2">
-              <button
-                onClick={() =>
-                  respondToRequest(member._id, "accepted")
-                }
-                className="px-3 py-1 rounded bg-green-600 text-white"
-              >
-                Accept
-              </button>
-
-              <button
-                onClick={() =>
-                  respondToRequest(member._id, "rejected")
-                }
-                className="px-3 py-1 rounded bg-red-600 text-white"
-              >
-                Reject
-              </button>
+          <div className="space-y-4">
+            <div className="card card-pad">
+              <h2 className="section-title">Trip details</h2>
+              <dl className="mt-3 space-y-2.5 text-sm">
+                {[
+                  ["Status", <TripStatusBadge key="s" phase={phase} />],
+                  ["Starts", formatDate(trip.startDate)],
+                  ["Ends", formatDate(trip.endDate)],
+                  ["Difficulty", <span key="d" className="capitalize">{trip.difficultyLevel}</span>],
+                  ["Travelling by", trip.vehicle || "Not decided"],
+                  [
+                    "Budget per person",
+                    formatINR(Math.round(trip.budget / Math.max(1, acceptedMembers.length || trip.maxMembers))),
+                  ],
+                ].map(([k, v]) => (
+                  <div key={k} className="flex items-center justify-between gap-4">
+                    <dt className="text-slate-500">{k}</dt>
+                    <dd className="text-right font-medium">{v}</dd>
+                  </div>
+                ))}
+              </dl>
             </div>
-          </li>
-        ))}
-      </ul>
-    )}
-  </div>
-)}
+
+            {isOrganizer && (
+              <div className="card card-pad">
+                <h2 className="section-title">Join requests</h2>
+                {pendingRequests.length === 0 ? (
+                  <p className="mt-2 text-sm text-slate-500">No pending requests.</p>
+                ) : (
+                  <ul className="mt-3 space-y-3">
+                    {pendingRequests.map((m) => (
+                      <li key={m._id} className="flex items-center gap-3">
+                        <Avatar name={m.user?.name} />
+                        <span className="flex-1 font-medium">
+                          {m.user?.name}
+                          {m.user?.verificationStatus === "verified" && (
+                            <span className="ml-1 text-xs text-emerald-600">✔ verified</span>
+                          )}
+                        </span>
+                        <button
+                          onClick={() => respondToRequest(m._id, "accepted")}
+                          disabled={busy || isFull || !phase.isActive}
+                          title={isFull ? "Trip is full" : !phase.isActive ? "Trip has ended" : ""}
+                          className="btn-primary px-3 py-1.5"
+                        >
+                          Accept
+                        </button>
+                        <button
+                          onClick={() => respondToRequest(m._id, "rejected")}
+                          disabled={busy}
+                          className="btn-secondary px-3 py-1.5"
+                        >
+                          Decline
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {isFull && pendingRequests.length > 0 && (
+                  <p className="hint mt-3">The trip is full — you can't accept more members.</p>
+                )}
+              </div>
+            )}
+          </div>
         </div>
       )}
 
       {/* AI itinerary */}
       {tab === "ai" && (
-        <div className="mt-4 bg-white dark:bg-gray-800 rounded-xl shadow p-6">
-          <div className="flex justify-between items-center mb-3">
-            <h2 className="font-semibold">AI-generated itinerary</h2>
-            <button
-              onClick={generateItinerary}
-              disabled={aiLoading}
-              className="px-4 py-2 rounded-md bg-brand-600 text-white hover:bg-brand-700 disabled:opacity-50"
-            >
-              {aiLoading ? "Generating..." : trip.aiItinerary?.itinerary ? "Regenerate" : "Generate itinerary"}
-            </button>
+        <div className="card card-pad mt-4">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h2 className="section-title">✨ AI-generated plan</h2>
+              {trip.aiItinerary?.generatedAt && (
+                <p className="hint">Generated {formatDate(trip.aiItinerary.generatedAt)}</p>
+              )}
+            </div>
+            {isMember && (
+              <button onClick={generateItinerary} disabled={aiLoading} className="btn-primary">
+                {aiLoading ? "Generating… (≈20s)" : trip.aiItinerary?.itinerary ? "🔄 Regenerate" : "✨ Generate itinerary"}
+              </button>
+            )}
           </div>
-          {aiError && <p className="text-sm text-red-600 mb-3">{aiError}</p>}
-         {trip.aiItinerary?.itinerary ? (
-  <div className="space-y-6">
+          {aiError && <div className="alert-error mt-4">⚠️ {aiError}</div>}
 
-    <div>
-      <h3 className="text-lg font-semibold">📅 Day-wise Itinerary</h3>
-      <p className="whitespace-pre-wrap">
-        {trip.aiItinerary.itinerary}
-      </p>
-    </div>
-
-    <div>
-      <h3 className="text-lg font-semibold">💰 Budget Estimation</h3>
-      <p className="whitespace-pre-wrap">
-  {trip.aiItinerary.budgetEstimation}
-</p>
-    </div>
-
-    <div>
-      <h3 className="text-lg font-semibold">🎒 Packing Checklist</h3>
-      <ul className="list-disc ml-6">
-        {trip.aiItinerary.packingChecklist?.map((item, index) => (
-          <li key={index}>{item}</li>
-        ))}
-      </ul>
-    </div>
-
-    <div>
-      <h3 className="text-lg font-semibold">🍜 Food Suggestions</h3>
-      <ul className="list-disc ml-6">
-        {trip.aiItinerary.foodSuggestions?.map((item, index) => (
-          <li key={index}>{item}</li>
-        ))}
-      </ul>
-    </div>
-
-    <div>
-      <h3 className="text-lg font-semibold">🏨 Hotel Recommendations</h3>
-      <ul className="list-disc ml-6">
-        {trip.aiItinerary.hotelRecommendations?.map((item, index) => (
-          <li key={index}>{item}</li>
-        ))}
-      </ul>
-    </div>
-
-    <div>
-      <h3 className="text-lg font-semibold">💡 Travel Tips</h3>
-      <ul className="list-disc ml-6">
-        {trip.aiItinerary.travelTips?.map((item, index) => (
-          <li key={index}>{item}</li>
-        ))}
-      </ul>
-    </div>
-
-    <div>
-      <h3 className="text-lg font-semibold">🛡 Safety Recommendations</h3>
-      <ul className="list-disc ml-6">
-        {trip.aiItinerary.safetyRecommendations?.map((item, index) => (
-          <li key={index}>{item}</li>
-        ))}
-      </ul>
-    </div>
-
-  </div>
-) : (
-  <p className="text-gray-500 text-sm">
-    No itinerary yet — click Generate Itinerary.
-  </p>
-)}
+          {trip.aiItinerary?.itinerary ? (
+            <div className="mt-6 space-y-6">
+              <section className="rounded-2xl bg-slate-50 p-5 dark:bg-slate-800/50">
+                <h3 className="font-bold">📅 Day-wise itinerary</h3>
+                <p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-slate-700 dark:text-slate-300">
+                  {trip.aiItinerary.itinerary}
+                </p>
+              </section>
+              <section className="rounded-2xl bg-slate-50 p-5 dark:bg-slate-800/50">
+                <h3 className="font-bold">💰 Budget estimation</h3>
+                <p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-slate-700 dark:text-slate-300">
+                  {trip.aiItinerary.budgetEstimation}
+                </p>
+              </section>
+              <div className="grid gap-4 md:grid-cols-2">
+                {[
+                  ["🎒 Packing checklist", trip.aiItinerary.packingChecklist],
+                  ["🍜 Food suggestions", trip.aiItinerary.foodSuggestions],
+                  ["🏨 Hotel recommendations", trip.aiItinerary.hotelRecommendations],
+                  ["💡 Travel tips", trip.aiItinerary.travelTips],
+                  ["🛡️ Safety recommendations", trip.aiItinerary.safetyRecommendations],
+                ].map(([title, items]) =>
+                  items?.length ? (
+                    <section key={title} className="rounded-2xl border border-slate-200 p-5 dark:border-slate-800">
+                      <h3 className="font-bold">{title}</h3>
+                      <ul className="mt-2 space-y-1.5 text-sm text-slate-700 dark:text-slate-300">
+                        {items.map((item, i) => (
+                          <li key={i} className="flex gap-2">
+                            <span className="text-brand-500">•</span>
+                            {item}
+                          </li>
+                        ))}
+                      </ul>
+                    </section>
+                  ) : null
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="mt-6 rounded-2xl border-2 border-dashed border-slate-200 py-12 text-center dark:border-slate-700">
+              <div className="text-4xl">🗺️</div>
+              <p className="mt-2 text-slate-500">
+                {isMember ? "No itinerary yet — generate one with AI." : "The organizer hasn't generated an itinerary yet."}
+              </p>
+            </div>
+          )}
         </div>
       )}
 
       {/* Chat */}
-      {tab === "chat" && (
-        <div className="mt-4 bg-white dark:bg-gray-800 rounded-xl shadow p-6 flex flex-col h-[520px]">
-          {/* Live Location Action Bar in Chat */}
-          <div className="mb-3 px-4 py-2.5 bg-blue-50 dark:bg-gray-700/60 rounded-xl flex items-center justify-between border border-blue-100 dark:border-gray-600">
-            <div className="flex items-center gap-2">
-              <span className={`w-3 h-3 rounded-full ${isSharingLocation ? "bg-green-500 animate-ping" : "bg-gray-400"}`} />
-              <span className="text-xs sm:text-sm font-semibold text-gray-800 dark:text-gray-100">
-                {isSharingLocation ? "🟢 Sharing Live Location" : "📍 Live Location"}
+      {tab === "chat" && isMember && (
+        <div className="card mt-4 flex h-[600px] flex-col overflow-hidden">
+          {/* Live location bar */}
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 bg-slate-50 px-4 py-3 dark:border-slate-800 dark:bg-slate-800/40">
+            <div className="flex items-center gap-2 text-sm">
+              <span className="relative flex h-3 w-3">
+                {isSharingLocation && <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400" />}
+                <span className={`relative inline-flex h-3 w-3 rounded-full ${isSharingLocation ? "bg-emerald-500" : "bg-slate-300"}`} />
               </span>
-              <span className="text-xs text-gray-500 dark:text-gray-400">
-                ({Object.keys(liveLocations).length} active)
-              </span>
-              {locationError && (
-                <span className="text-xs text-red-600 dark:text-red-400">{locationError}</span>
-              )}
+              <span className="font-semibold">{isSharingLocation ? "Sharing live location" : "Live location"}</span>
+              <span className="text-slate-500">· {Object.keys(liveLocations).length} active</span>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex gap-2">
               <button
                 type="button"
                 onClick={toggleLocationSharing}
-                className={`text-xs px-3 py-1.5 rounded-lg font-medium transition shadow-sm ${
-                  isSharingLocation
-                    ? "bg-red-600 hover:bg-red-700 text-white"
-                    : "bg-green-600 hover:bg-green-700 text-white"
-                }`}
+                className={`btn px-3 py-1.5 text-xs ${isSharingLocation ? "bg-red-600 text-white hover:bg-red-700" : "bg-emerald-600 text-white hover:bg-emerald-700"}`}
               >
-                {isSharingLocation ? "🔴 Stop Sharing" : "📍 Share Location"}
+                {isSharingLocation ? "Stop sharing" : "📍 Share location"}
               </button>
-              <button
-                type="button"
-                onClick={() => setTab("map")}
-                className="text-xs px-2.5 py-1.5 rounded-lg bg-white dark:bg-gray-800 text-blue-600 dark:text-blue-400 hover:bg-gray-100 dark:hover:bg-gray-700 font-medium border border-gray-200 dark:border-gray-600 transition"
-              >
-                Map 🗺️
+              <button type="button" onClick={() => setTab("map")} className="btn-secondary px-3 py-1.5 text-xs">
+                🗺️ Map
               </button>
             </div>
+            {locationError && <p className="w-full text-xs text-red-600 dark:text-red-400">{locationError}</p>}
           </div>
 
-          <div className="flex-1 overflow-y-auto space-y-2 mb-3">
-            {messages.map((m) => (
-              <div key={m._id} className="text-sm">
-                <span className="font-semibold">{m.sender?.name}:</span>
-                {m.type === "image" ? (
-                  <img
-                    src={m.mediaUrl}
-                    alt="chat"
-                    className="mt-2 max-w-xs rounded-lg shadow-sm"
-                  />
-                ) : (
-                  <span> {m.text}</span>
-                )}
+          {/* Messages */}
+          <div className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
+            {messages.length === 0 && (
+              <div className="py-16 text-center text-slate-400">
+                <div className="text-4xl">💬</div>
+                <p className="mt-2 text-sm">No messages yet — say hi to your travel group!</p>
               </div>
-            ))}
+            )}
+            {messages.map((m) => {
+              const mine = m.sender?._id === user?._id;
+              return (
+                <div key={m._id} className={`flex items-end gap-2 ${mine ? "flex-row-reverse" : ""}`}>
+                  {!mine && <Avatar name={m.sender?.name} size="h-7 w-7 text-xs" />}
+                  <div
+                    className={`max-w-[75%] rounded-2xl px-3.5 py-2 text-sm shadow-sm ${
+                      mine
+                        ? "rounded-br-md bg-brand-600 text-white"
+                        : "rounded-bl-md bg-slate-100 text-slate-800 dark:bg-slate-800 dark:text-slate-100"
+                    }`}
+                  >
+                    {!mine && <p className="mb-0.5 text-xs font-semibold text-brand-700 dark:text-brand-300">{m.sender?.name}</p>}
+                    {m.mediaUrl && (
+                      <a href={m.mediaUrl} target="_blank" rel="noreferrer">
+                        <img src={m.mediaUrl} alt="Shared in chat" className="mb-1 max-h-64 rounded-xl" loading="lazy" />
+                      </a>
+                    )}
+                    {m.text && <p className="whitespace-pre-wrap break-words">{m.text}</p>}
+                    <p className={`mt-0.5 text-right text-[10px] ${mine ? "text-white/70" : "text-slate-400"}`}>
+                      {new Date(m.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                    </p>
+                  </div>
+                </div>
+              );
+            })}
+            <div ref={messagesEndRef} />
           </div>
 
-          <form onSubmit={sendMessage} className="flex flex-col gap-2">
-            <input
-              type="file"
-              accept="image/*"
-              onChange={(e) => setSelectedImage(e.target.files[0])}
-              className="text-xs text-gray-500 file:mr-2 file:py-1 file:px-2 file:rounded-md file:border-0 file:text-xs file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
-            />
-
-            <div className="flex gap-2">
+          {/* Composer */}
+          <form onSubmit={sendMessage} className="border-t border-slate-100 p-3 dark:border-slate-800">
+            {chatError && <p className="field-error mb-2">{chatError}</p>}
+            {selectedImage && (
+              <div className="mb-2 flex items-center gap-2 rounded-lg bg-slate-100 px-3 py-1.5 text-xs dark:bg-slate-800">
+                🖼️ <span className="flex-1 truncate">{selectedImage.name}</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedImage(null);
+                    if (fileInputRef.current) fileInputRef.current.value = "";
+                  }}
+                  className="font-bold text-slate-500 hover:text-red-600"
+                  aria-label="Remove image"
+                >
+                  ✕
+                </button>
+              </div>
+            )}
+            <div className="flex items-center gap-2">
+              <label className="btn-ghost cursor-pointer px-3" title="Attach image">
+                📎
+                <input ref={fileInputRef} type="file" accept="image/*" onChange={handleImagePick} className="hidden" />
+              </label>
               <input
                 value={messageText}
                 onChange={(e) => setMessageText(e.target.value)}
-                placeholder="Type a message..."
-                className="flex-1 px-3 py-2 rounded-md border dark:bg-gray-700 dark:border-gray-600 text-sm"
+                placeholder="Type a message…"
+                maxLength={2000}
+                className="input flex-1"
               />
-
-              <button className="px-4 py-2 rounded-md bg-brand-600 text-white hover:bg-brand-700 text-sm font-medium">
-                Send
+              <button disabled={sending || (!messageText.trim() && !selectedImage)} className="btn-primary">
+                {sending ? "…" : "Send"}
               </button>
             </div>
           </form>
@@ -698,169 +848,109 @@ const acceptedMembers = members.filter(
       )}
 
       {/* Expenses */}
-      {tab === "expenses" && (
-        <div className="mt-4 space-y-4">
-          <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-6">
-            <h2 className="font-semibold mb-3">Add an expense</h2>
-            <form onSubmit={addExpense} className="flex gap-2">
-              <input
-                placeholder="Description"
-                value={expenseForm.description}
-                onChange={(e) => setExpenseForm({ ...expenseForm, description: e.target.value })}
-                required
-                className="flex-1 px-3 py-2 rounded-md border dark:bg-gray-700 dark:border-gray-600"
-              />
-              <input
-                type="number"
-                placeholder="Amount"
-                value={expenseForm.amount}
-                onChange={(e) => setExpenseForm({ ...expenseForm, amount: e.target.value })}
-                required
-                className="w-32 px-3 py-2 rounded-md border dark:bg-gray-700 dark:border-gray-600"
-              />
+      {tab === "expenses" && isMember && (
+        <div className="mt-4 space-y-6">
+          {/* Common */}
+          <div className="grid gap-4 lg:grid-cols-[1fr_340px]">
+            <div className="card card-pad">
+              <div className="flex items-center justify-between">
+                <h2 className="section-title">Shared expenses</h2>
+                <span className="text-sm font-semibold text-slate-500">Total {formatINR(total(expenses))}</span>
+              </div>
+              <p className="hint">Split equally between all {acceptedMembers.length} members.</p>
 
+              <form onSubmit={addExpense} noValidate className="mt-4 flex flex-col gap-2 sm:flex-row">
+                <input
+                  placeholder="What was it for? e.g. Fuel"
+                  value={expenseForm.description}
+                  onChange={(e) => setExpenseForm({ ...expenseForm, description: e.target.value })}
+                  maxLength={120}
+                  className="input flex-1"
+                />
+                <input
+                  type="number"
+                  placeholder="₹ Amount"
+                  min={1}
+                  value={expenseForm.amount}
+                  onChange={(e) => setExpenseForm({ ...expenseForm, amount: e.target.value })}
+                  className="input sm:w-36"
+                />
+                <button className="btn-primary">Add</button>
+              </form>
+              {expenseError && <p className="field-error">{expenseError}</p>}
 
-              <button className="px-4 py-2 rounded-md bg-brand-600 text-white hover:bg-brand-700">
-                Add
-              </button>
-            </form>
+              <ExpenseList expenses={expenses} />
+            </div>
+            <BalanceCard title="Balances" summary={summary} />
           </div>
 
-          <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-6">
-            <h2 className="font-semibold mb-3">Expenses</h2>
-            <ul className="space-y-2 text-sm">
-              {expenses.map((e) => (
-                <li key={e._id} className="flex justify-between">
-                  <span>{e.description} — paid by {e.paidBy?.name}</span>
-                  <span>₹{e.amount}</span>
-                </li>
-              ))}
-            </ul>
+          {/* Custom */}
+          <div className="grid gap-4 lg:grid-cols-[1fr_340px]">
+            <div className="card card-pad">
+              <div className="flex items-center justify-between">
+                <h2 className="section-title">Custom split</h2>
+                <span className="text-sm font-semibold text-slate-500">Total {formatINR(total(customExpenses))}</span>
+              </div>
+              <p className="hint">Split an expense between selected members only.</p>
+
+              <form onSubmit={addCustomExpense} noValidate className="mt-4 space-y-3">
+                <div className="flex flex-col gap-2 sm:flex-row">
+                  <input
+                    placeholder="Description"
+                    value={customExpenseForm.description}
+                    onChange={(e) => setCustomExpenseForm({ ...customExpenseForm, description: e.target.value })}
+                    maxLength={120}
+                    className="input flex-1"
+                  />
+                  <input
+                    type="number"
+                    placeholder="₹ Amount"
+                    min={1}
+                    value={customExpenseForm.amount}
+                    onChange={(e) => setCustomExpenseForm({ ...customExpenseForm, amount: e.target.value })}
+                    className="input sm:w-36"
+                  />
+                </div>
+                <div>
+                  <p className="label">Split between</p>
+                  <div className="flex flex-wrap gap-2">
+                    {acceptedMembers.map((member) => {
+                      const uid = member.user?._id;
+                      const checked = selectedMembers.includes(uid);
+                      return (
+                        <label
+                          key={uid}
+                          className={`cursor-pointer rounded-full border px-3 py-1.5 text-sm font-medium transition ${
+                            checked
+                              ? "border-brand-500 bg-brand-50 text-brand-700 dark:bg-brand-900/40 dark:text-brand-200"
+                              : "border-slate-200 text-slate-600 hover:border-slate-300 dark:border-slate-700 dark:text-slate-300"
+                          }`}
+                        >
+                          <input
+                            type="checkbox"
+                            className="sr-only"
+                            checked={checked}
+                            onChange={(e) =>
+                              setSelectedMembers((prev) =>
+                                e.target.checked ? [...prev, uid] : prev.filter((x) => x !== uid)
+                              )
+                            }
+                          />
+                          {checked ? "✓ " : ""}
+                          {member.user?.name}
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+                <button className="btn-primary">Add custom expense</button>
+                {customExpenseError && <p className="field-error">{customExpenseError}</p>}
+              </form>
+
+              <ExpenseList expenses={customExpenses} showSplit />
+            </div>
+            <BalanceCard title="Custom balances" summary={customSummary} />
           </div>
-
-          <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-6">
-            <h2 className="font-semibold mb-3">Balance summary</h2>
-            <ul className="space-y-2 text-sm">
-              {summary.map((s) => (
-                <li key={s.userId} className="flex justify-between">
-                  <span>{s.name}</span>
-                  <span className={s.netBalance >= 0 ? "text-green-600" : "text-red-600"}>
-                    {s.netBalance >= 0 ? `is owed ₹${s.netBalance}` : `owes ₹${Math.abs(s.netBalance)}`}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          </div>
-
-             
-      {/* ---------- CUSTOM EXPENSES ---------- */}
-
-<div className="bg-white dark:bg-gray-800 rounded-xl shadow p-6">
-  <h2 className="font-semibold mb-3">Add Custom Expense</h2>
-
-  <form
-    onSubmit={addCustomExpense}
-    className="flex flex-col gap-3"
-  >
-    <input
-      placeholder="Description"
-      value={customExpenseForm.description}
-      onChange={(e) =>
-        setCustomExpenseForm({
-          ...customExpenseForm,
-          description: e.target.value,
-        })
-      }
-      className="px-3 py-2 border rounded"
-      required
-    />
-
-    <input
-      type="number"
-      placeholder="Amount"
-      value={customExpenseForm.amount}
-      onChange={(e) =>
-        setCustomExpenseForm({
-          ...customExpenseForm,
-          amount: e.target.value,
-        })
-      }
-      className="px-3 py-2 border rounded"
-      required
-    />
-
-    <div>
-      <p className="font-medium mb-2">Split Between</p>
-
-      {acceptedMembers.map((member) => (
-        <label key={member.user._id} className="block">
-          <input
-            type="checkbox"
-            checked={selectedMembers.includes(member.user._id)}
-            onChange={(e) => {
-              if (e.target.checked) {
-                setSelectedMembers((prev) => [
-                  ...prev,
-                  member.user._id,
-                ]);
-              } else {
-                setSelectedMembers((prev) =>
-                  prev.filter((id) => id !== member.user._id)
-                );
-              }
-            }}
-          />
-          {" "}
-          {member.user.name}
-        </label>
-      ))}
-    </div>
-
-    <button className="px-4 py-2 rounded-md bg-brand-600 text-white">
-      Add Custom Expense
-    </button>
-  </form>
-</div>
-
-<div className="bg-white dark:bg-gray-800 rounded-xl shadow p-6">
-  <h2 className="font-semibold mb-3">Custom Expenses</h2>
-
-  <ul className="space-y-2">
-    {customExpenses.map((e) => (
-      <li key={e._id} className="flex justify-between">
-        <span>{e.description} — paid by {e.paidBy?.name}</span>
-        <span>₹{e.amount}</span>
-      </li>
-    ))}
-  </ul>
-</div>
-
-<div className="bg-white dark:bg-gray-800 rounded-xl shadow p-6">
-  <h2 className="font-semibold mb-3">
-    Custom Balance Summary
-  </h2>
-
-  <ul className="space-y-2">
-    {customSummary.map((s) => (
-      <li key={s.userId} className="flex justify-between">
-        <span>{s.name}</span>
-
-        <span
-          className={
-            s.netBalance >= 0
-              ? "text-green-600"
-              : "text-red-600"
-          }
-        >
-          {s.netBalance >= 0
-            ? `is owed ₹${s.netBalance}`
-            : `owes ₹${Math.abs(s.netBalance)}`}
-        </span>
-      </li>
-    ))}
-  </ul>
-</div>
-
         </div>
       )}
 
@@ -878,7 +968,64 @@ const acceptedMembers = members.filter(
           />
         </div>
       )}
+    </div>
+  );
+}
 
+function ExpenseList({ expenses, showSplit = false }) {
+  if (!expenses.length) {
+    return <p className="mt-6 text-center text-sm text-slate-400">No expenses yet.</p>;
+  }
+  return (
+    <ul className="mt-5 divide-y divide-slate-100 dark:divide-slate-800">
+      {expenses.map((e) => (
+        <li key={e._id} className="flex items-center justify-between gap-3 py-3">
+          <div className="min-w-0">
+            <p className="truncate font-medium">{e.description}</p>
+            <p className="text-xs text-slate-500">
+              Paid by {e.paidBy?.name || "Former member"} · {formatDate(e.date || e.createdAt)}
+              {showSplit && e.splitBetween?.length > 0 && <> · Split: {e.splitBetween.map((s) => s?.name).filter(Boolean).join(", ")}</>}
+            </p>
+          </div>
+          <span className="shrink-0 font-bold">{formatINR(e.amount)}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function BalanceCard({ title, summary }) {
+  return (
+    <div className="card card-pad h-fit">
+      <h2 className="section-title">{title}</h2>
+      {summary.length === 0 ? (
+        <p className="mt-2 text-sm text-slate-400">Nothing to settle yet.</p>
+      ) : (
+        <ul className="mt-3 space-y-2.5">
+          {summary.map((s) => {
+            const settled = Math.abs(s.netBalance) < 0.01;
+            return (
+              <li key={s.userId} className="flex items-center justify-between gap-2 text-sm">
+                <span className="flex items-center gap-2 font-medium">
+                  <Avatar name={s.name} size="h-7 w-7 text-xs" />
+                  {s.name}
+                </span>
+                <span
+                  className={`badge ${
+                    settled
+                      ? "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300"
+                      : s.netBalance > 0
+                      ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-300"
+                      : "bg-red-50 text-red-700 dark:bg-red-950/50 dark:text-red-300"
+                  }`}
+                >
+                  {settled ? "Settled" : s.netBalance > 0 ? `gets ${formatINR(s.netBalance)}` : `owes ${formatINR(Math.abs(s.netBalance))}`}
+                </span>
+              </li>
+            );
+          })}
+        </ul>
+      )}
     </div>
   );
 }

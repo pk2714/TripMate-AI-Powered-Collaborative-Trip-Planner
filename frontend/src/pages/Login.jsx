@@ -1,90 +1,100 @@
 import { useState } from "react";
-import { Link, useNavigate, useLocation } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext.jsx";
+import AuthLayout, { PasswordInput, isValidEmail } from "../components/AuthLayout.jsx";
 
 export default function Login() {
   const { login } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
   const [form, setForm] = useState({ email: "", password: "" });
-  const [error, setError] = useState("");
+  const [errors, setErrors] = useState({});
+  const [serverError, setServerError] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
-  const handleChange = (e) => setForm({ ...form, [e.target.name]: e.target.value });
+  const handleChange = (e) => {
+    setForm({ ...form, [e.target.name]: e.target.value });
+    setErrors((er) => ({ ...er, [e.target.name]: undefined }));
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    setError("");
+    const next = {};
+    if (!isValidEmail(form.email)) next.email = "Enter a valid email address.";
+    if (!form.password) next.password = "Enter your password.";
+    setErrors(next);
+    setServerError("");
+    if (Object.keys(next).length) return;
+
     setSubmitting(true);
     try {
-      await login(form.email, form.password);
-      navigate("/dashboard");
+      await login(form.email.trim(), form.password);
+      navigate(location.state?.from || "/dashboard");
     } catch (err) {
-      setError(err.response?.data?.message || "Login failed.");
+      setServerError(err.response?.data?.message || "Login failed. Please try again.");
     } finally {
       setSubmitting(false);
     }
   };
 
   return (
-    <div className="max-w-md mx-auto mt-16 p-8 bg-white dark:bg-gray-800 rounded-xl shadow">
-      <h1 className="text-2xl font-bold mb-2">Welcome back</h1>
+    <AuthLayout
+      title="Welcome back"
+      subtitle="Log in to continue planning your trips."
+      footer={
+        <>
+          No account yet?{" "}
+          <Link to="/register" className="font-semibold text-brand-600 hover:underline">
+            Create one
+          </Link>
+        </>
+      }
+    >
       {location.state?.justRegistered && (
-        <p className="mb-4 text-sm text-brand-600">
-          Account created! Check your email to verify, then log in.
-        </p>
+        <div className="alert-success mb-5">✅ Account created! Check your email to verify it, then log in.</div>
       )}
-      {error && <p className="mb-4 text-sm text-red-600">{error}</p>}
+      {serverError && <div className="alert-error mb-5">⚠️ {serverError}</div>}
 
-      <form onSubmit={handleSubmit} className="space-y-4">
+      <form onSubmit={handleSubmit} noValidate className="space-y-5">
         <div>
-          <label className="block text-sm mb-1">Email</label>
+          <label htmlFor="email" className="label">Email</label>
           <input
+            id="email"
             type="email"
             name="email"
+            autoComplete="email"
             value={form.email}
             onChange={handleChange}
-            required
-            className="w-full px-3 py-2 rounded-md border dark:bg-gray-700 dark:border-gray-600"
+            placeholder="you@example.com"
+            className={`input ${errors.email ? "input-error" : ""}`}
           />
+          {errors.email && <p className="field-error">{errors.email}</p>}
         </div>
+
         <div>
-         <div className="flex justify-between items-center mb-1">
-          <label className="block text-sm">Password</label>
+          <div className="mb-1.5 flex items-center justify-between">
+            <label htmlFor="password" className="text-sm font-medium text-slate-700 dark:text-slate-300">
+              Password
+            </label>
+            <Link to="/forgot-password" className="text-xs font-semibold text-brand-600 hover:underline">
+              Forgot password?
+            </Link>
+          </div>
+          <PasswordInput
+            id="password"
+            name="password"
+            value={form.password}
+            onChange={handleChange}
+            autoComplete="current-password"
+            invalid={!!errors.password}
+          />
+          {errors.password && <p className="field-error">{errors.password}</p>}
+        </div>
 
-         <Link
-         to="/forgot-password"
-         className="text-sm text-brand-600 hover:underline"
-      >
-        Forgot Password?
-        </Link>
-     </div>
-
-    <input
-    type="password"
-    name="password"
-    value={form.password}
-    onChange={handleChange}
-    required
-    className="w-full px-3 py-2 rounded-md border dark:bg-gray-700 dark:border-gray-600"
-  />
-</div>
-
-        <button
-          type="submit"
-          disabled={submitting}
-          className="w-full py-2 rounded-md bg-brand-600 text-white hover:bg-brand-700 disabled:opacity-50"
-        >
-          {submitting ? "Logging in..." : "Log in"}
+        <button type="submit" disabled={submitting} className="btn-primary w-full py-3">
+          {submitting ? "Logging in…" : "Log in"}
         </button>
       </form>
-
-      <p className="mt-4 text-sm text-center">
-        No account yet?{" "}
-        <Link to="/register" className="text-brand-600 hover:underline">
-          Sign up
-        </Link>
-      </p>
-    </div>
+    </AuthLayout>
   );
 }

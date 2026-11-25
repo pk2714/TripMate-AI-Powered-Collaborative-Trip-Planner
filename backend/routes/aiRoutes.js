@@ -2,6 +2,7 @@ const express = require("express");
 const rateLimit = require("express-rate-limit");
 const { generateItinerary, chatWithAI } = require("../controllers/aiController");
 const { requireAuth } = require("../middleware/auth");
+const { requireTripMember } = require("../middleware/tripMember");
 
 const router = express.Router();
 
@@ -13,7 +14,7 @@ const chatLimiter = rateLimit({
   message: { message: "You're sending messages too quickly. Please wait a moment." },
 });
 
-router.post("/trips/:id/itinerary", requireAuth, generateItinerary);
+router.post("/trips/:id/itinerary", requireAuth, requireTripMember, generateItinerary);
 router.post("/chat", requireAuth, chatLimiter, chatWithAI);
 
 module.exports = router;

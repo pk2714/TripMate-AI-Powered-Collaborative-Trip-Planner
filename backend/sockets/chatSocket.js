@@ -98,13 +98,19 @@ function registerChatHandlers(io) {
           return;
         }
 
+        const text = typeof payload.text === "string" ? payload.text.trim().slice(0, 2000) : "";
+        const mediaUrl =
+          typeof payload.mediaUrl === "string" && payload.mediaUrl.startsWith("https://res.cloudinary.com/")
+            ? payload.mediaUrl
+            : "";
+        if (!text && !mediaUrl) return;
+
         const message = await Message.create({
           trip: payload.tripId,
           sender: userId,
-          text: payload.text,
-          type: payload.type || "text",
-          mediaUrl: payload.mediaUrl,
-          location: payload.location,
+          text,
+          type: mediaUrl ? "image" : "text",
+          mediaUrl,
         });
 
         const populated = await message.populate("sender", "name profilePhoto");

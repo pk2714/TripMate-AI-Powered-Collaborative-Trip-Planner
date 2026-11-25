@@ -57,7 +57,7 @@ export default function PwaManager() {
         </div>
       )}
 
-      <div className="fixed bottom-6 left-4 right-4 sm:right-auto z-50 flex flex-col gap-2 sm:max-w-sm">
+      <div className="fixed bottom-4 left-4 right-20 sm:bottom-6 sm:right-auto z-50 flex flex-col gap-2 sm:max-w-sm">
         {needRefresh && (
           <Toast>
             <span className="flex-1">✨ A new version of TripMate is available.</span>
