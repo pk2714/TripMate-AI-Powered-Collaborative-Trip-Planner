@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, NavLink, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext.jsx";
-import { useInstallPrompt } from "../pwa/pwa.js";
+import { useInstallApp } from "../pwa/pwa.js";
 
 const linkCls = ({ isActive }) =>
   `rounded-lg px-3 py-2 text-sm font-medium transition ${
@@ -14,7 +14,7 @@ export default function Navbar() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
-  const { canInstall, promptInstall } = useInstallPrompt();
+  const { showInstall, install } = useInstallApp();
   const [open, setOpen] = useState(false);
 
   // Close the mobile menu after navigating.
@@ -53,9 +53,13 @@ export default function Navbar() {
         </div>
 
         <div className="hidden items-center gap-2 md:flex">
-          {canInstall && (
-            <button onClick={promptInstall} className="btn-secondary py-2" title="Install TripMate as an app">
-              📲 Install
+          {showInstall && (
+            <button
+              onClick={install}
+              className="btn border border-brand-600 bg-brand-50 py-2 text-brand-700 hover:bg-brand-100 dark:bg-brand-900/30 dark:text-brand-200"
+              title="Install TripMate as an app"
+            >
+              📲 Install App
             </button>
           )}
           {user ? (
@@ -85,10 +89,19 @@ export default function Navbar() {
           )}
         </div>
 
-        {/* Mobile toggle */}
+        {/* Mobile: install + menu toggle */}
+        <div className="flex items-center gap-1 md:hidden">
+        {showInstall && (
+          <button
+            onClick={install}
+            className="btn border border-brand-600 bg-brand-50 px-3 py-1.5 text-xs text-brand-700 dark:bg-brand-900/30 dark:text-brand-200"
+          >
+            📲 Install
+          </button>
+        )}
         <button
           onClick={() => setOpen((o) => !o)}
-          className="rounded-lg p-2 text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800 md:hidden"
+          className="rounded-lg p-2 text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
           aria-label={open ? "Close menu" : "Open menu"}
           aria-expanded={open}
         >
@@ -100,6 +113,7 @@ export default function Navbar() {
             )}
           </svg>
         </button>
+        </div>
       </nav>
 
       {/* Mobile menu */}
@@ -130,8 +144,8 @@ export default function Navbar() {
                 </Link>
               </div>
             )}
-            {canInstall && (
-              <button onClick={promptInstall} className="btn-secondary mt-1 w-full">
+            {showInstall && (
+              <button onClick={install} className="btn-secondary mt-1 w-full">
                 📲 Install App
               </button>
             )}

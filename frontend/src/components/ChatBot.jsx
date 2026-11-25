@@ -1,6 +1,10 @@
 import { useState, useRef, useEffect } from "react";
 import api from "../api/axios";
+import { Link } from "react-router-dom";
 import { useChatBot } from "../context/ChatBotContext.jsx";
+import { useAuth } from "../context/AuthContext.jsx";
+
+const TIP_KEY = "tripmate-ai-tip-seen";
 
 // Renders inline markdown: **bold**, *italic*, `code`.
 function renderInline(text, keyPrefix) {
@@ -74,7 +78,19 @@ function renderFormattedText(text) {
 
 export default function ChatBot() {
   const { tripContext } = useChatBot();
+  const { user } = useAuth();
   const [isOpen, setIsOpen] = useState(false);
+  // One-time speech bubble so first-time visitors notice the assistant.
+  const [showTip, setShowTip] = useState(() => !localStorage.getItem(TIP_KEY));
+
+  const openChat = () => {
+    setIsOpen(true);
+    setIsMinimized(false);
+    if (showTip) {
+      localStorage.setItem(TIP_KEY, "1");
+      setShowTip(false);
+    }
+  };
   const [isMinimized, setIsMinimized] = useState(false);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -189,20 +205,51 @@ export default function ChatBot() {
   };
 
   return (
-    <div className="fixed bottom-4 right-4 sm:bottom-6 sm:right-6 z-50 font-sans">
+    // Bottom-right, above everything (incl. the Leaflet map), clear of the
+    // iPhone home indicator via the safe-area inset.
+    <div
+      className="fixed right-4 sm:right-6 z-[1500] flex flex-col items-end font-sans"
+      style={{ bottom: "max(1rem, calc(env(safe-area-inset-bottom) + 0.75rem))" }}
+    >
       {/* Floating Action Button when closed */}
       {!isOpen && (
-        <button
-          onClick={() => setIsOpen(true)}
-          className="group flex items-center gap-2.5 p-3.5 sm:px-4 sm:py-3 bg-gradient-to-r from-brand-600 to-teal-500 hover:from-brand-700 hover:to-teal-600 text-white rounded-full shadow-2xl shadow-brand-600/30 transition-all duration-300 transform hover:scale-105"
-          aria-label="Open TripMate AI Assistant"
-        >
-          <span className="text-2xl animate-pulse">🤖</span>
-          <span className="hidden sm:inline font-semibold text-sm tracking-wide">
-            Ask TripMate AI
-          </span>
-          <span className="hidden sm:block w-2.5 h-2.5 bg-green-300 rounded-full animate-ping mr-0.5" />
-        </button>
+        <>
+          {showTip && (
+            <div className="relative mb-3 max-w-[15rem] rounded-2xl bg-white px-4 py-3 text-sm text-slate-700 shadow-xl ring-1 ring-slate-200 dark:bg-slate-800 dark:text-slate-200 dark:ring-slate-700">
+              <button
+                onClick={() => {
+                  localStorage.setItem(TIP_KEY, "1");
+                  setShowTip(false);
+                }}
+                className="absolute right-2 top-1.5 text-slate-400 hover:text-slate-700"
+                aria-label="Dismiss"
+              >
+                ×
+              </button>
+              <p className="pr-3">
+                👋 Need trip ideas, a packing list or budget tips? <strong>Ask me!</strong>
+              </p>
+              <span className="absolute -bottom-1.5 right-10 h-3 w-3 rotate-45 bg-white ring-1 ring-slate-200 [clip-path:polygon(100%_0,100%_100%,0_100%)] dark:bg-slate-800 dark:ring-slate-700" />
+            </div>
+          )}
+          <button
+            onClick={openChat}
+            className="group flex items-center gap-2.5 sm:gap-3 rounded-full bg-gradient-to-r from-brand-600 to-teal-500 py-2.5 pl-2.5 pr-4 sm:py-3 sm:pl-3 sm:pr-5 text-white shadow-2xl shadow-brand-700/40 ring-4 ring-white transition-all duration-300 hover:scale-105 hover:from-brand-700 hover:to-teal-600 dark:ring-slate-900"
+            aria-label="Open TripMate AI Assistant"
+          >
+            <span className="relative flex h-10 w-10 items-center justify-center rounded-full bg-white/20 text-2xl">
+              🤖
+              <span className="absolute -right-0.5 -top-0.5 flex h-3 w-3">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-green-300" />
+                <span className="relative inline-flex h-3 w-3 rounded-full bg-green-400 ring-2 ring-white" />
+              </span>
+            </span>
+            <span className="text-left leading-tight">
+              <span className="block text-base font-bold">Ask TripMate AI</span>
+              <span className="hidden text-xs text-white/85 sm:block">Your travel assistant</span>
+            </span>
+          </button>
+        </>
       )}
 
       {/* Chat Window */}
@@ -211,7 +258,7 @@ export default function ChatBot() {
           className={`flex flex-col bg-white dark:bg-gray-900 rounded-2xl shadow-2xl border border-gray-200 dark:border-gray-800 transition-all duration-200 overflow-hidden ${
             isMinimized
               ? "w-80 h-16"
-              : "w-[92vw] sm:w-[420px] h-[580px] max-h-[82vh]"
+              : "w-[calc(100vw-2rem)] sm:w-[440px] h-[620px] max-h-[calc(100dvh-6rem)]"
           }`}
         >
           {/* Header */}
@@ -237,13 +284,13 @@ export default function ChatBot() {
 
             {/* Header Controls */}
             <div className="flex items-center gap-1 text-white/80">
-              <button
+              {user && <button
                 onClick={clearChat}
                 title="Clear Chat"
                 className="p-1.5 rounded-lg hover:bg-white/20 hover:text-white transition text-xs"
               >
                 🧹
-              </button>
+              </button>}
               <button
                 onClick={() => setIsMinimized(!isMinimized)}
                 title={isMinimized ? "Expand" : "Minimize"}
@@ -261,7 +308,27 @@ export default function ChatBot() {
             </div>
           </div>
 
-          {!isMinimized && (
+          {!isMinimized && !user && (
+            <div className="flex flex-1 flex-col items-center justify-center gap-4 p-8 text-center">
+              <div className="text-5xl">🤖</div>
+              <div>
+                <h4 className="text-lg font-bold text-slate-900 dark:text-white">Hi, I'm TripMate AI!</h4>
+                <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+                  Log in to get destination ideas, itineraries, packing lists and budget tips tailored to your trips.
+                </p>
+              </div>
+              <div className="flex w-full flex-col gap-2">
+                <Link to="/login" onClick={() => setIsOpen(false)} className="btn-primary w-full">
+                  Log in to chat
+                </Link>
+                <Link to="/register" onClick={() => setIsOpen(false)} className="btn-secondary w-full">
+                  Create a free account
+                </Link>
+              </div>
+            </div>
+          )}
+
+          {!isMinimized && user && (
             <>
               {/* Messages Body */}
               <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-gray-50/50 dark:bg-gray-950/40">

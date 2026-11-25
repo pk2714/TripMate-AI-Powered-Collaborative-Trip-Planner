@@ -43,6 +43,48 @@ export function useInstallPrompt() {
   return { canInstall, promptInstall };
 }
 
+// ---------------------------------------------------------------------------
+// "Install app" for every browser.
+// Chrome/Edge (Android + desktop) give us a native prompt via
+// `beforeinstallprompt`; Safari, Firefox and others don't, so for them we
+// open a help dialog (rendered by PwaManager) with step-by-step instructions.
+// ---------------------------------------------------------------------------
+export const INSTALL_HELP_EVENT = "tripmate:install-help";
+
+let installed = false;
+if (typeof window !== "undefined") {
+  window.addEventListener("appinstalled", () => {
+    installed = true;
+    notifyInstall();
+  });
+}
+
+export function useInstallApp() {
+  const { canInstall, promptInstall } = useInstallPrompt();
+  const isInstalled = useSyncExternalStore(subscribeInstall, () => installed || isStandalone());
+
+  const install = async () => {
+    if (canInstall) {
+      const accepted = await promptInstall();
+      if (accepted) return;
+    }
+    window.dispatchEvent(new Event(INSTALL_HELP_EVENT));
+  };
+
+  return { showInstall: !isInstalled, canPromptNatively: canInstall, install };
+}
+
+// Which instructions to show in the install help dialog.
+export function detectPlatform() {
+  const ua = navigator.userAgent;
+  if (isIos()) return /CriOS|FxiOS|EdgiOS/.test(ua) ? "ios-other" : "ios-safari";
+  if (/Android/i.test(ua)) return /Firefox/i.test(ua) ? "android-firefox" : /SamsungBrowser/i.test(ua) ? "android-samsung" : "android-chrome";
+  if (/Edg\//.test(ua)) return "desktop-edge";
+  if (/Firefox/i.test(ua)) return "desktop-firefox";
+  if (/Safari/i.test(ua) && !/Chrome|Chromium/i.test(ua)) return "desktop-safari";
+  return "desktop-chrome";
+}
+
 export function isStandalone() {
   return (
     window.matchMedia?.("(display-mode: standalone)").matches ||

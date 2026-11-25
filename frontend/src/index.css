@@ -5,6 +5,22 @@
 @layer base {
   html {
     -webkit-tap-highlight-color: transparent;
+    /* Larger base text across the whole app. Every Tailwind size is in rem,
+       so text, spacing and components all scale from this:
+       17px on phones, 18px on tablets and desktops (browser default is 16px). */
+    font-size: 106.25%;
+  }
+  @media (min-width: 640px) {
+    html {
+      font-size: 112.5%;
+    }
+  }
+
+  /* Leaflet's panes/controls use z-index 400–1000. Give the map its own
+     stacking context so it never covers the sticky navbar or the AI button. */
+  .leaflet-container {
+    isolation: isolate;
+    z-index: 0;
   }
   body {
     @apply bg-slate-50 text-slate-900 antialiased dark:bg-slate-950 dark:text-slate-100;

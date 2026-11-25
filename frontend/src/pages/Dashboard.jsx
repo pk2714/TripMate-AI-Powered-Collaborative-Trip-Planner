@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import api from "../api/axios";
 import TripCard from "../components/TripCard.jsx";
+import InstallBanner from "../components/InstallBanner.jsx";
 import { useAuth } from "../context/AuthContext.jsx";
 import { getTripPhase, sortTrips } from "../utils/trip.js";
 
@@ -102,6 +103,8 @@ export default function Dashboard() {
       </section>
 
       <div className="mx-auto max-w-7xl px-4 sm:px-6">
+        <InstallBanner />
+
         {/* Filters */}
         <div className="mt-8 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <h2 className="text-2xl font-bold text-slate-900 dark:text-white">

@@ -16,6 +16,15 @@ export default defineConfig({
       injectRegister: false, // registered from PwaManager via virtual:pwa-register/react
       includeAssets: ["favicon.ico", "favicon.png", "apple-touch-icon.png"],
 
+      // Also register the service worker + manifest on the Vite dev server
+      // (localhost:5173), so "Install app" works while developing too.
+      devOptions: {
+        enabled: true,
+        type: "module",
+        navigateFallback: "index.html",
+        suppressWarnings: true,
+      },
+
       manifest: {
         id: "/",
         name: "TripMate — AI Trip Planner",

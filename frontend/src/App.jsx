@@ -21,7 +21,7 @@ export default function App() {
 
   return (
     <ChatBotProvider>
-    <div className="min-h-screen">
+    <div className="min-h-screen pb-28">
       <PwaManager />
       <Navbar />
       <Routes>
@@ -58,8 +58,10 @@ export default function App() {
           }
         />
       </Routes>
-      {/* AI assistant needs a session (the /api/ai/chat route requires login). */}
-      {user && <ChatBot key={user._id} />}
+      {/* Always visible; logged-out visitors get a "log in to chat" prompt
+          (the /api/ai/chat route requires a session). Keyed by user so the
+          conversation resets on login/logout. */}
+      <ChatBot key={user?._id || "guest"} />
     </div>
     </ChatBotProvider>
   );

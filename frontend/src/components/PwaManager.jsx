@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useRegisterSW } from "virtual:pwa-register/react";
-import { isIos, isStandalone, useOnlineStatus } from "../pwa/pwa.js";
+import { INSTALL_HELP_EVENT, isIos, isStandalone, useOnlineStatus } from "../pwa/pwa.js";
+import InstallAppDialog from "./InstallAppDialog.jsx";
 
 const UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000; // check for a new deploy hourly
 const IOS_HINT_KEY = "tripmate-ios-install-hint-dismissed";
@@ -47,6 +48,7 @@ export default function PwaManager() {
 
   return (
     <>
+      <InstallAppDialog />
       {!online && (
         <div
           role="status"
@@ -57,7 +59,7 @@ export default function PwaManager() {
         </div>
       )}
 
-      <div className="fixed bottom-4 left-4 right-20 sm:bottom-6 sm:right-auto z-50 flex flex-col gap-2 sm:max-w-sm">
+      <div className="fixed left-4 right-4 top-20 z-[1600] sm:bottom-6 sm:right-auto sm:top-auto flex flex-col gap-2 sm:max-w-sm">
         {needRefresh && (
           <Toast>
             <span className="flex-1">✨ A new version of TripMate is available.</span>
@@ -80,10 +82,16 @@ export default function PwaManager() {
 
         {showIosHint && (
           <Toast>
-            <span className="flex-1">
-              📲 Install TripMate: tap <strong>Share</strong>{" "}
-              <span aria-hidden="true">⎋</span> then <strong>Add to Home Screen</strong>.
-            </span>
+            <span className="flex-1">📲 Install TripMate on your iPhone for quick, offline access.</span>
+            <button
+              onClick={() => {
+                dismissIosHint();
+                window.dispatchEvent(new Event(INSTALL_HELP_EVENT));
+              }}
+              className="px-3 py-1.5 rounded-lg bg-brand-600 hover:bg-brand-700 text-white text-xs font-semibold"
+            >
+              How?
+            </button>
             <CloseButton onClick={dismissIosHint} />
           </Toast>
         )}
