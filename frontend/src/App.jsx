@@ -1,6 +1,10 @@
 import { Routes, Route } from "react-router-dom";
 import Navbar from "./components/Navbar.jsx";
 import ProtectedRoute from "./components/ProtectedRoute.jsx";
+import ChatBot from "./components/ChatBot.jsx";
+import PwaManager from "./components/PwaManager.jsx";
+import { useAuth } from "./context/AuthContext.jsx";
+import { ChatBotProvider } from "./context/ChatBotContext.jsx";
 import Login from "./pages/Login.jsx";
 import Register from "./pages/Register.jsx";
 import VerifyEmail from "./pages/VerifyEmail.jsx";
@@ -13,8 +17,12 @@ import Profile from "./pages/Profile.jsx";
 import Emergency from "./pages/Emergency";
 
 export default function App() {
+  const { user } = useAuth();
+
   return (
+    <ChatBotProvider>
     <div className="min-h-screen">
+      <PwaManager />
       <Navbar />
       <Routes>
         <Route path="/" element={<Dashboard />} />
@@ -50,6 +58,9 @@ export default function App() {
           }
         />
       </Routes>
+      {/* AI assistant needs a session (the /api/ai/chat route requires login). */}
+      {user && <ChatBot key={user._id} />}
     </div>
+    </ChatBotProvider>
   );
 }

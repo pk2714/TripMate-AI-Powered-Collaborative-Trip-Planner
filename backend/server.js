@@ -47,9 +47,23 @@ app.get("/test", (req, res) => {
 // Normalise CLIENT_URL (strip trailing slash if present)
 const clientOrigin = (process.env.CLIENT_URL || "").replace(/\/+$/, "");
 
+const corsOriginHandler = (origin, callback) => {
+  // Allow requests with no origin (like mobile apps, curl, or same-origin)
+  if (!origin) return callback(null, true);
+  if (
+    origin.includes("localhost") ||
+    origin.includes("127.0.0.1") ||
+    origin.endsWith(".onrender.com") ||
+    (clientOrigin && origin === clientOrigin)
+  ) {
+    return callback(null, origin);
+  }
+  return callback(null, origin);
+};
+
 const io = new Server(server, {
   cors: {
-    origin: clientOrigin || false,
+    origin: corsOriginHandler,
     credentials: true,
   },
 });
@@ -68,7 +82,7 @@ app.use(
 
 app.use(
   cors({
-    origin: clientOrigin || false,
+    origin: corsOriginHandler,
     credentials: true,
   })
 );
@@ -82,22 +96,26 @@ app.use(
   })
 );
 
-app.use(
-  session({
-    secret: process.env.SESSION_SECRET,
-    resave: false,
-    saveUninitialized: false,
-    store: MongoStore.create({
-      mongoUrl: process.env.MONGO_URI,
-    }),
-    cookie: {
-      httpOnly: true,
-      secure: IS_PROD,
-      sameSite: "lax",
-      maxAge: 7 * 24 * 60 * 60 * 1000,
-    },
-  })
-);
+const sessionMiddleware = session({
+  secret: process.env.SESSION_SECRET,
+  resave: false,
+  saveUninitialized: false,
+  store: MongoStore.create({
+    mongoUrl: process.env.MONGO_URI,
+  }),
+  cookie: {
+    httpOnly: true,
+    secure: IS_PROD,
+    sameSite: "lax",
+    maxAge: 7 * 24 * 60 * 60 * 1000,
+  },
+});
+
+app.use(sessionMiddleware);
+
+// Share the same session with Socket.IO so socket handlers can trust
+// socket.request.session.userId instead of a client-supplied userId.
+io.engine.use(sessionMiddleware);
 
 // ── API Routes ──
 app.get("/api/health", (req, res) => {
@@ -121,7 +139,23 @@ const distPath = path.join(__dirname, "..", "frontend", "dist");
 
 if (fs.existsSync(distPath)) {
   // Serve static assets (JS, CSS, images, manifest, SW, etc.)
-  app.use(express.static(distPath));
+  // The service worker, its registration script, the manifest and
+  // index.html must always be revalidated, otherwise browsers can keep an
+  // old service worker around and users never receive new deploys.
+  // Vite's hashed files under /assets never change, so cache them for a year.
+  const NO_CACHE_FILES = new Set(["sw.js", "registerSW.js", "manifest.webmanifest", "index.html"]);
+  app.use(
+    express.static(distPath, {
+      setHeaders(res, filePath) {
+        const name = path.basename(filePath);
+        if (NO_CACHE_FILES.has(name) || name.startsWith("workbox-")) {
+          res.setHeader("Cache-Control", "no-cache");
+        } else if (filePath.includes(`${path.sep}assets${path.sep}`)) {
+          res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+        }
+      },
+    })
+  );
 
   // SPA catch-all — any non-API route returns index.html so client-side
   // routing (React Router) works on page refresh / direct navigation.
@@ -129,6 +163,7 @@ if (fs.existsSync(distPath)) {
     if (req.originalUrl.startsWith("/api")) {
       return next();
     }
+    res.setHeader("Cache-Control", "no-cache");
     res.sendFile(path.join(distPath, "index.html"));
   });
 } else {

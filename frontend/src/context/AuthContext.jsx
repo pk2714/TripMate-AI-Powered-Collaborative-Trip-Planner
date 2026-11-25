@@ -1,5 +1,6 @@
 import { createContext, useContext, useState, useEffect } from "react";
 import api from "../api/axios";
+import { clearUserCaches } from "../pwa/pwa.js";
 
 const AuthContext = createContext(null);
 
@@ -30,6 +31,7 @@ export function AuthProvider({ children }) {
 
   const logout = async () => {
     await api.post("/auth/logout");
+    await clearUserCaches(); // don't leave this user's cached trips on a shared device
     setUser(null);
   };
 

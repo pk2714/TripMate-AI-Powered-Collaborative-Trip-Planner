@@ -7,14 +7,29 @@ export default function Dashboard() {
   const [trips, setTrips] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
+  const [error, setError] = useState(null);
 
-  useEffect(() => {
+  const fetchTrips = (searchTerm = search) => {
     setLoading(true);
+    setError(null);
 
     api
-      .get("/trips", { params: search ? { destination: search } : {} })
-      .then((res) => setTrips(res.data.trips))
+      .get("/trips", { params: searchTerm ? { destination: searchTerm } : {} })
+      .then((res) => {
+        setTrips(res.data?.trips || []);
+      })
+      .catch((err) => {
+        console.error("Error fetching trips:", err);
+        setError(
+          err.response?.data?.message ||
+            "Unable to connect to server. If on Render free tier, the backend may take ~45s to wake up."
+        );
+      })
       .finally(() => setLoading(false));
+  };
+
+  useEffect(() => {
+    fetchTrips(search);
   }, [search]);
 
   return (
@@ -107,12 +122,32 @@ export default function Dashboard() {
 
         {/* Loading */}
         {loading ? (
-          <div className="flex justify-center items-center py-20">
-            <div className="text-lg text-gray-500 dark:text-gray-400">
+          <div className="flex flex-col justify-center items-center py-20">
+            <div className="w-10 h-10 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mb-4" />
+            <div className="text-lg font-medium text-gray-700 dark:text-gray-300">
               Loading trips...
             </div>
+            <p className="text-xs text-gray-400 mt-2 max-w-sm text-center">
+              Connecting to database. If loading on Render, free instances can take up to 45s to wake up from sleep.
+            </p>
           </div>
-
+        ) : error ? (
+          /* Error State with Retry */
+          <div className="text-center py-16 px-6 bg-white dark:bg-gray-800 rounded-2xl border border-red-200 dark:border-red-900/50 shadow-sm">
+            <div className="text-4xl mb-3">⚠️</div>
+            <h3 className="text-xl font-bold text-gray-800 dark:text-white mb-2">
+              Could not load trips
+            </h3>
+            <p className="text-sm text-red-500 mb-6 max-w-md mx-auto">
+              {error}
+            </p>
+            <button
+              onClick={() => fetchTrips()}
+              className="px-6 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-medium transition"
+            >
+              🔄 Retry Connection
+            </button>
+          </div>
         ) : trips.length === 0 ? (
 
           /* Empty State */

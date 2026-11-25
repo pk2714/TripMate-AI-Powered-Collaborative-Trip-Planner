@@ -1,8 +1,9 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { useParams } from "react-router-dom";
 import { io } from "socket.io-client";
 import api from "../api/axios";
 import { useAuth } from "../context/AuthContext.jsx";
+import { useChatBot } from "../context/ChatBotContext.jsx";
 import TripMap from "../components/TripMap";
 import { saveTrip, getTrip} from "../utils/db";
 
@@ -35,7 +36,15 @@ export default function TripDetails() {
   const [messageText, setMessageText] = useState("");
   const [selectedImage, setSelectedImage] = useState(null);
   const [liveLocations, setLiveLocations] = useState({});
+  const [isSharingLocation, setIsSharingLocation] = useState(false);
+  const [locationError, setLocationError] = useState("");
   const [socket, setSocket] = useState(null);
+  const socketRef = useRef(null);
+  const watchIdRef = useRef(null);
+  const lastSentRef = useRef(0);
+  const lastPositionRef = useRef(null);
+
+  const { setTripContext } = useChatBot();
 
   const [expenses, setExpenses] = useState([]);
   const [summary, setSummary] = useState([]);
@@ -111,96 +120,179 @@ useEffect(() => {
   }
 }, [tab, loadMessages]);
 
-  // --- Chat: connect socket once we know who we are ---
+  // Give the floating AI assistant context about the trip being viewed.
+  useEffect(() => {
+    if (trip?._id) setTripContext({ tripId: trip._id, destination: trip.destination });
+    return () => setTripContext(null);
+  }, [trip?._id, trip?.destination, setTripContext]);
+
+  // --- Chat + live location: one socket per trip page ---
+  // The server identifies us from the session cookie, so no userId is sent.
   useEffect(() => {
     if (!user) return;
     const s = io(SOCKET_URL, { withCredentials: true });
+    socketRef.current = s;
 
-    s.on("connect", () => {
-  console.log("✅ Socket Connected:", s.id);
-});
-     s.emit("joinTrip", {
-    tripId: id,
-     userId: user._id,
-   });
+    // Rooms are lost on disconnect, so (re)join on every connect.
+    s.on("connect", () => s.emit("joinTrip", { tripId: id }));
+
     s.on("newMessage", (msg) => setMessages((prev) => [...prev, msg]));
-     s.on("locationUpdate", (data) => {
-  console.log("LOCATION RECEIVED:", data);
 
-  setLiveLocations((prev) => ({
-    ...prev,
-    [data.userId]: {
-      lat: data.lat,
-      lng: data.lng,
-    },
-  }));
-});
+    // Everyone already sharing when we join.
+    // Arrives once joinTrip succeeds. If we were sharing before a reconnect,
+    // the server dropped our location, so resend the last known position.
+    s.on("locationSnapshot", (list) => {
+      setLiveLocations(Object.fromEntries((list || []).map((loc) => [loc.userId, loc])));
+      if (watchIdRef.current !== null && lastPositionRef.current) {
+        s.emit("shareLocation", { tripId: id, ...lastPositionRef.current });
+      }
+    });
+
+    s.on("locationUpdate", (loc) => {
+      setLiveLocations((prev) => ({ ...prev, [loc.userId]: loc }));
+    });
+
+    s.on("locationStopped", ({ userId }) => {
+      setLiveLocations((prev) => {
+        if (!prev[userId]) return prev;
+        const next = { ...prev };
+        delete next[userId];
+        return next;
+      });
+    });
+
+    s.on("errorMessage", (msg) => console.warn("Socket:", msg));
+
     setSocket(s);
     return () => {
-      s.emit("leaveTrip", {
-        tripId: id,
-        userId: user._id,
-      });
+      s.emit("leaveTrip", { tripId: id });
       s.disconnect();
+      socketRef.current = null;
+      setLiveLocations({});
     };
   }, [id, user]);
 
-  const sendMessage = async (e) => {
-  e.preventDefault();
-
-   const formData = new FormData();
-
-  let imageUrl = "";
-
- if (selectedImage) {
-   formData.append("image", selectedImage);
- 
-   const res = await api.post(
-    "/chat/upload",
-    formData,
-    {
-      headers: {
-        "Content-Type": "multipart/form-data",
-      },
+  const clearLocationWatch = () => {
+    if (watchIdRef.current !== null) {
+      navigator.geolocation.clearWatch(watchIdRef.current);
+      watchIdRef.current = null;
     }
-  );
+  };
 
-  imageUrl = res.data.imageUrl;
+  // Stop the GPS watch when leaving the page (the socket cleanup above
+  // tells the server, which notifies the other members).
+  useEffect(() => {
+    return () => {
+      clearLocationWatch();
+      setIsSharingLocation(false);
+    };
+  }, [id]);
 
-  console.log(imageUrl);
-}
+  const LOCATION_MIN_INTERVAL_MS = 4000;
 
-  console.log("sendMessage called");
+  const startSharingLocation = () => {
+    setLocationError("");
+    if (!navigator.geolocation) {
+      setLocationError("Geolocation is not supported by your browser.");
+      return;
+    }
+    if (!socketRef.current?.connected) {
+      setLocationError("Still connecting to the server. Please try again in a moment.");
+      return;
+    }
+    if (watchIdRef.current !== null) return; // already watching
 
-  if ((!messageText.trim() && !selectedImage) || !socket) return;
+    setIsSharingLocation(true);
+    lastSentRef.current = 0;
+    lastPositionRef.current = null;
 
-  console.log("Socket:", socket);
-console.log("Connected:", socket?.connected);
+    watchIdRef.current = navigator.geolocation.watchPosition(
+      (position) => {
+        lastPositionRef.current = {
+          lat: position.coords.latitude,
+          lng: position.coords.longitude,
+          accuracy: position.coords.accuracy,
+        };
+        const now = Date.now();
+        if (now - lastSentRef.current < LOCATION_MIN_INTERVAL_MS) return;
+        lastSentRef.current = now;
 
-  socket.emit("sendMessage", {
-    tripId: id,
-    senderId: user._id,
-    text: messageText,
-    type: imageUrl ? "image" : "text",
-    mediaUrl: imageUrl,
-  });
+        socketRef.current?.emit("shareLocation", { tripId: id, ...lastPositionRef.current });
+      },
+      (error) => {
+        console.error("Location watch error:", error);
+        // TIMEOUT is transient (e.g. weak GPS indoors) — keep watching.
+        if (error.code === error.TIMEOUT) return;
+        setLocationError(
+          error.code === error.PERMISSION_DENIED
+            ? "Location permission denied. Allow location access in your browser settings."
+            : `Location error: ${error.message}`
+        );
+        stopSharingLocation();
+      },
+      {
+        enableHighAccuracy: true,
+        timeout: 20000,
+        maximumAge: 5000,
+      }
+    );
+  };
 
-  setMessageText("");
-  setSelectedImage(null);
-};
+  const stopSharingLocation = () => {
+    clearLocationWatch();
+    setIsSharingLocation(false);
+    socketRef.current?.emit("stopSharingLocation", { tripId: id });
+    if (user?._id) {
+      setLiveLocations((prev) => {
+        const next = { ...prev };
+        delete next[user._id];
+        return next;
+      });
+    }
+  };
 
-const shareLocation = () => {
-  if (!navigator.geolocation || !socket) return;
+  const toggleLocationSharing = () => {
+    if (isSharingLocation) {
+      stopSharingLocation();
+    } else {
+      startSharingLocation();
+    }
+  };
 
-  navigator.geolocation.watchPosition((position) => {
-    socket.emit("shareLocation", {
+  const sendMessage = async (e) => {
+    e.preventDefault();
+
+    let imageUrl = "";
+
+    if (selectedImage) {
+      try {
+        const formData = new FormData();
+        formData.append("image", selectedImage);
+
+        const res = await api.post("/chat/upload", formData, {
+          headers: {
+            "Content-Type": "multipart/form-data",
+          },
+        });
+
+        imageUrl = res.data?.imageUrl || "";
+      } catch (err) {
+        console.error("Image upload failed:", err);
+      }
+    }
+
+    if ((!messageText.trim() && !imageUrl) || !socket) return;
+
+    socket.emit("sendMessage", {
       tripId: id,
-      userId: user._id,
-      lat: position.coords.latitude,
-      lng: position.coords.longitude,
+      text: messageText,
+      type: imageUrl ? "image" : "text",
+      mediaUrl: imageUrl,
     });
-  });
-};
+
+    setMessageText("");
+    setSelectedImage(null);
+  };
 
 
   // --- AI itinerary ---
@@ -527,56 +619,81 @@ const acceptedMembers = members.filter(
 
       {/* Chat */}
       {tab === "chat" && (
-        <div className="mt-4 bg-white dark:bg-gray-800 rounded-xl shadow p-6 flex flex-col h-96">
-          <div className="flex-1 overflow-y-auto space-y-2 mb-3">
-               {messages.map((m) => (
-  <div key={m._id} className="text-sm">
-    <span className="font-semibold">
-      {m.sender?.name}:
-    </span>
-
-    {m.type === "image" ? (
-      <img
-        src={m.mediaUrl}
-        alt="chat"
-        className="mt-2 max-w-xs rounded-lg"
-      />
-    ) : (
-      <span> {m.text}</span>
-    )}
-  </div>
-))}
+        <div className="mt-4 bg-white dark:bg-gray-800 rounded-xl shadow p-6 flex flex-col h-[520px]">
+          {/* Live Location Action Bar in Chat */}
+          <div className="mb-3 px-4 py-2.5 bg-blue-50 dark:bg-gray-700/60 rounded-xl flex items-center justify-between border border-blue-100 dark:border-gray-600">
+            <div className="flex items-center gap-2">
+              <span className={`w-3 h-3 rounded-full ${isSharingLocation ? "bg-green-500 animate-ping" : "bg-gray-400"}`} />
+              <span className="text-xs sm:text-sm font-semibold text-gray-800 dark:text-gray-100">
+                {isSharingLocation ? "🟢 Sharing Live Location" : "📍 Live Location"}
+              </span>
+              <span className="text-xs text-gray-500 dark:text-gray-400">
+                ({Object.keys(liveLocations).length} active)
+              </span>
+              {locationError && (
+                <span className="text-xs text-red-600 dark:text-red-400">{locationError}</span>
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={toggleLocationSharing}
+                className={`text-xs px-3 py-1.5 rounded-lg font-medium transition shadow-sm ${
+                  isSharingLocation
+                    ? "bg-red-600 hover:bg-red-700 text-white"
+                    : "bg-green-600 hover:bg-green-700 text-white"
+                }`}
+              >
+                {isSharingLocation ? "🔴 Stop Sharing" : "📍 Share Location"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setTab("map")}
+                className="text-xs px-2.5 py-1.5 rounded-lg bg-white dark:bg-gray-800 text-blue-600 dark:text-blue-400 hover:bg-gray-100 dark:hover:bg-gray-700 font-medium border border-gray-200 dark:border-gray-600 transition"
+              >
+                Map 🗺️
+              </button>
+            </div>
           </div>
-           <form onSubmit={sendMessage} className="flex flex-col gap-2">
 
-  <input
-    type="file"
-    accept="image/*"
-    onChange={(e) => setSelectedImage(e.target.files[0])}
-  />
+          <div className="flex-1 overflow-y-auto space-y-2 mb-3">
+            {messages.map((m) => (
+              <div key={m._id} className="text-sm">
+                <span className="font-semibold">{m.sender?.name}:</span>
+                {m.type === "image" ? (
+                  <img
+                    src={m.mediaUrl}
+                    alt="chat"
+                    className="mt-2 max-w-xs rounded-lg shadow-sm"
+                  />
+                ) : (
+                  <span> {m.text}</span>
+                )}
+              </div>
+            ))}
+          </div>
 
-   <button
-    type="button"
-    onClick={shareLocation}
-    className="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700"
-  >
-    📍 Share Live Location
-  </button>
+          <form onSubmit={sendMessage} className="flex flex-col gap-2">
+            <input
+              type="file"
+              accept="image/*"
+              onChange={(e) => setSelectedImage(e.target.files[0])}
+              className="text-xs text-gray-500 file:mr-2 file:py-1 file:px-2 file:rounded-md file:border-0 file:text-xs file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
+            />
 
-  <div className="flex gap-2">
-    <input
-      value={messageText}
-      onChange={(e) => setMessageText(e.target.value)}
-      placeholder="Type a message..."
-      className="flex-1 px-3 py-2 rounded-md border dark:bg-gray-700 dark:border-gray-600"
-    />
+            <div className="flex gap-2">
+              <input
+                value={messageText}
+                onChange={(e) => setMessageText(e.target.value)}
+                placeholder="Type a message..."
+                className="flex-1 px-3 py-2 rounded-md border dark:bg-gray-700 dark:border-gray-600 text-sm"
+              />
 
-    <button className="px-4 py-2 rounded-md bg-brand-600 text-white hover:bg-brand-700">
-      Send
-    </button>
-  </div>
-
-</form>
+              <button className="px-4 py-2 rounded-md bg-brand-600 text-white hover:bg-brand-700 text-sm font-medium">
+                Send
+              </button>
+            </div>
+          </form>
         </div>
       )}
 
@@ -750,7 +867,15 @@ const acceptedMembers = members.filter(
       {/* Map */}
       {tab === "map" && (
         <div className="mt-4">
-          <TripMap destination={trip.destination} liveLocations={liveLocations} />
+          <TripMap
+            destination={trip.destination}
+            liveLocations={liveLocations}
+            isSharingLocation={isSharingLocation}
+            toggleLocationSharing={toggleLocationSharing}
+            currentUser={user}
+            isMember={isMember}
+            locationError={locationError}
+          />
         </div>
       )}
 

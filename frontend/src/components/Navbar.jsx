@@ -1,9 +1,11 @@
 import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext.jsx";
+import { useInstallPrompt } from "../pwa/pwa.js";
 
 export default function Navbar() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+  const { canInstall, promptInstall } = useInstallPrompt();
 
   const handleLogout = async () => {
     await logout();
@@ -17,6 +19,15 @@ export default function Navbar() {
       </Link>
 
       <div className="flex items-center gap-4">
+        {canInstall && (
+          <button
+            onClick={promptInstall}
+            className="px-3 py-1.5 rounded-md border border-brand-600 text-brand-600 hover:bg-brand-50 dark:hover:bg-gray-700 text-sm font-medium"
+            title="Install TripMate as an app"
+          >
+            📲 Install App
+          </button>
+        )}
         {user ? (
           <>
             <Link to="/dashboard" className="hover:text-brand-600">
