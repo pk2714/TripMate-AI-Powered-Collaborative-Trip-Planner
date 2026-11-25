@@ -8,3 +8,4 @@ frontend/.env
 *.log
 .DS_Store
 backend/uploads
+frontend/dev-dist
