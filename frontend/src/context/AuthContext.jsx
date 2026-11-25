@@ -1,6 +1,8 @@
 import { createContext, useContext, useState, useEffect } from "react";
 import api from "../api/axios";
 import { clearUserCaches } from "../pwa/pwa.js";
+import { clearOfflineData } from "../utils/db";
+import { cachedGet, isNetworkError } from "../utils/offline.js";
 
 const AuthContext = createContext(null);
 
@@ -8,12 +10,12 @@ export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
 
-  // On first load, check if a session cookie already logs us in
-  // (e.g. the user refreshed the page).
+  // On first load, check if a session cookie already logs us in. When
+  // offline, fall back to the user saved on this device (up to 24h old) so
+  // saved trips stay accessible instead of bouncing to the login page.
   useEffect(() => {
-    api
-      .get("/auth/me")
-      .then((res) => setUser(res.data.user))
+    cachedGet("/auth/me")
+      .then(({ data }) => setUser(data.user))
       .catch(() => setUser(null))
       .finally(() => setLoading(false));
   }, []);
@@ -30,8 +32,15 @@ export function AuthProvider({ children }) {
   };
 
   const logout = async () => {
-    await api.post("/auth/logout");
-    await clearUserCaches(); // don't leave this user's cached trips on a shared device
+    try {
+      await api.post("/auth/logout");
+    } catch (err) {
+      if (!isNetworkError(err)) throw err; // offline: still clear local data below
+    }
+    // Don't leave this user's trips, chat or queued actions on a shared device.
+    window.dispatchEvent(new Event("tripmate:logout"));
+    await Promise.all([clearUserCaches(), clearOfflineData().catch(() => {})]);
+    localStorage.removeItem("tripmate-last-sync");
     setUser(null);
   };
 

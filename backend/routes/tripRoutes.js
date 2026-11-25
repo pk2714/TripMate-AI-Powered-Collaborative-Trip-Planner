@@ -2,6 +2,7 @@ const express = require("express");
 const {
   createTrip,
   getTrips,
+  getMyTrips,
   getTripById,
   updateTrip,
   deleteTrip,
@@ -14,6 +15,7 @@ const { requireAuth } = require("../middleware/auth");
 const router = express.Router();
 
 router.get("/", getTrips);
+router.get("/mine", requireAuth, getMyTrips); // must come before "/:id"
 router.post("/", requireAuth, createTrip);
 router.get("/:id", getTripById);
 router.put("/:id", requireAuth, updateTrip);

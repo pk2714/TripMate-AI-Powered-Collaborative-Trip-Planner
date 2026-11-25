@@ -6,19 +6,13 @@ import { useAuth } from "../context/AuthContext.jsx";
 import { useChatBot } from "../context/ChatBotContext.jsx";
 import TripMap from "../components/TripMap";
 import TripStatusBadge from "../components/TripStatusBadge.jsx";
-import { saveTrip, getTrip } from "../utils/db";
+import { getTrip } from "../utils/db";
 import { formatDate, formatDateRange, formatINR, getTripPhase, tripDays } from "../utils/trip.js";
+import { SOCKET_URL } from "../api/socket.js";
+import { useLiveLocation } from "../context/LiveLocationContext.jsx";
+import { cachedGet, isNetworkError, queueOffline, timeAgo, usePendingOutbox } from "../utils/offline.js";
+import { useOnlineStatus } from "../pwa/pwa.js";
 
-// One socket per mounted TripDetails page. In dev, Vite's proxy only covers
-// HTTP requests, so Socket.IO connects straight to the backend origin.
-// In production the frontend is served by Express from the same origin.
-const SOCKET_URL = import.meta.env.VITE_API_URL
-  ? import.meta.env.VITE_API_URL.replace(/\/api$/, "")
-  : import.meta.env.DEV
-    ? "http://localhost:5000"
-    : window.location.origin;
-
-const LOCATION_MIN_INTERVAL_MS = 4000;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const MAX_EXPENSE = 10_000_000;
 
@@ -58,7 +52,11 @@ export default function TripDetails() {
   const [members, setMembers] = useState([]);
   const [myMembership, setMyMembership] = useState(null);
   const [loadError, setLoadError] = useState("");
-  const [fromCache, setFromCache] = useState(false);
+  const [savedAt, setSavedAt] = useState(null); // set when showing data saved on the device
+  const online = useOnlineStatus();
+  const pending = usePendingOutbox(id);
+  const pendingMessages = pending.filter((p) => p.kind === "message");
+  const pendingExpenses = pending.filter((p) => p.kind === "expense");
   const [tab, setTab] = useState("overview");
   const [notice, setNotice] = useState(null); // { type, text }
   const [busy, setBusy] = useState(false);
@@ -75,12 +73,11 @@ export default function TripDetails() {
   const messagesEndRef = useRef(null);
 
   const [liveLocations, setLiveLocations] = useState({});
-  const [isSharingLocation, setIsSharingLocation] = useState(false);
-  const [locationError, setLocationError] = useState("");
   const socketRef = useRef(null);
-  const watchIdRef = useRef(null);
-  const lastSentRef = useRef(0);
-  const lastPositionRef = useRef(null);
+  // Sharing runs app-wide (keeps going when you leave this page).
+  const live = useLiveLocation();
+  const isSharingLocation = live.isSharingTrip(id);
+  const locationError = live.error;
 
   const [expenses, setExpenses] = useState([]);
   const [summary, setSummary] = useState([]);
@@ -92,45 +89,42 @@ export default function TripDetails() {
   const [customExpenses, setCustomExpenses] = useState([]);
   const [customSummary, setCustomSummary] = useState([]);
 
-  // --- Loading ---
+  // --- Loading (falls back to data saved on this device for 24h) ---
   const loadTrip = useCallback(async () => {
     try {
-      const res = await api.get(`/trips/${id}`);
-      await saveTrip({
-        id: res.data.trip._id,
-        trip: res.data.trip,
-        members: res.data.members,
-        myMembership: res.data.myMembership,
-      }).catch(() => {});
-      setTrip(res.data.trip);
-      setMembers(res.data.members);
-      setMyMembership(res.data.myMembership);
-      setFromCache(false);
+      const { data, fromCache, savedAt: at } = await cachedGet(`/trips/${id}`);
+      setTrip(data.trip);
+      setMembers(data.members);
+      setMyMembership(data.myMembership);
+      setSavedAt(fromCache ? at : null);
       setLoadError("");
     } catch (err) {
-      console.error("Failed to load trip from server:", err);
       const status = err.response?.status;
       if (status === 404 || status === 400) {
         setLoadError("This trip doesn't exist or has been deleted.");
         return;
       }
-      // Network problem → fall back to the copy saved for offline use.
-      const cached = await getTrip(id).catch(() => null);
-      if (cached) {
-        setTrip(cached.trip);
-        setMembers(cached.members || []);
-        setMyMembership(cached.myMembership || null);
-        setFromCache(true);
+      // Older offline copy saved by previous app versions.
+      const legacy = await getTrip(id).catch(() => null);
+      if (legacy) {
+        setTrip(legacy.trip);
+        setMembers(legacy.members || []);
+        setMyMembership(legacy.myMembership || null);
+        setSavedAt(Date.now() - 1);
       } else {
-        setLoadError("Couldn't load this trip. Check your connection and try again.");
+        setLoadError(
+          navigator.onLine
+            ? "Couldn't load this trip. Please try again."
+            : "You're offline and this trip hasn't been saved on this device in the last 24 hours."
+        );
       }
     }
   }, [id]);
 
   const loadMessages = useCallback(async () => {
     try {
-      const res = await api.get(`/chat/${id}/messages`);
-      setMessages(res.data);
+      const { data } = await cachedGet(`/chat/${id}/messages`);
+      setMessages(data);
     } catch (err) {
       console.error("Failed to load messages", err);
     }
@@ -139,10 +133,10 @@ export default function TripDetails() {
   const loadExpenses = useCallback(async () => {
     try {
       const [commonExp, commonSummary, customExp, customSummaryRes] = await Promise.all([
-        api.get(`/trips/${id}/expenses?expenseType=common`),
-        api.get(`/trips/${id}/expenses/summary?expenseType=common`),
-        api.get(`/trips/${id}/expenses?expenseType=custom`),
-        api.get(`/trips/${id}/expenses/summary?expenseType=custom`),
+        cachedGet(`/trips/${id}/expenses`, { expenseType: "common" }),
+        cachedGet(`/trips/${id}/expenses/summary`, { expenseType: "common" }),
+        cachedGet(`/trips/${id}/expenses`, { expenseType: "custom" }),
+        cachedGet(`/trips/${id}/expenses/summary`, { expenseType: "custom" }),
       ]);
       setExpenses(commonExp.data.expenses);
       setSummary(commonSummary.data.summary);
@@ -162,9 +156,20 @@ export default function TripDetails() {
     if (tab === "expenses") loadExpenses();
   }, [tab, loadMessages, loadExpenses]);
 
+  // When queued (offline) items get delivered, refresh the lists.
+  const pendingCount = pending.length;
+  const prevPending = useRef(pendingCount);
+  useEffect(() => {
+    if (pendingCount < prevPending.current && online) {
+      loadMessages();
+      if (tab === "expenses") loadExpenses();
+    }
+    prevPending.current = pendingCount;
+  }, [pendingCount, online, tab, loadMessages, loadExpenses]);
+
   useEffect(() => {
     if (tab === "chat") messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
-  }, [messages, tab]);
+  }, [messages, pendingMessages.length, tab]);
 
   // Give the floating AI assistant context about the trip being viewed.
   useEffect(() => {
@@ -184,13 +189,9 @@ export default function TripDetails() {
 
     s.on("newMessage", (msg) => setMessages((prev) => [...prev, msg]));
 
-    // Arrives once joinTrip succeeds. If we were sharing before a reconnect,
-    // the server dropped our location, so resend the last known position.
+    // Everyone currently sharing, sent once joinTrip succeeds.
     s.on("locationSnapshot", (list) => {
       setLiveLocations(Object.fromEntries((list || []).map((loc) => [loc.userId, loc])));
-      if (watchIdRef.current !== null && lastPositionRef.current) {
-        s.emit("shareLocation", { tripId: id, ...lastPositionRef.current });
-      }
     });
 
     s.on("locationUpdate", (loc) => {
@@ -216,79 +217,10 @@ export default function TripDetails() {
     };
   }, [id, user]);
 
-  const clearLocationWatch = () => {
-    if (watchIdRef.current !== null) {
-      navigator.geolocation.clearWatch(watchIdRef.current);
-      watchIdRef.current = null;
-    }
+  const toggleLocationSharing = () => {
+    if (isSharingLocation) live.stop();
+    else live.start(trip);
   };
-
-  // Stop the GPS watch when leaving the page (the socket cleanup above
-  // tells the server, which notifies the other members).
-  useEffect(() => {
-    return () => {
-      clearLocationWatch();
-      setIsSharingLocation(false);
-    };
-  }, [id]);
-
-  const startSharingLocation = () => {
-    setLocationError("");
-    if (!navigator.geolocation) {
-      setLocationError("Geolocation is not supported by your browser.");
-      return;
-    }
-    if (!socketRef.current?.connected) {
-      setLocationError("Still connecting to the server. Please try again in a moment.");
-      return;
-    }
-    if (watchIdRef.current !== null) return; // already watching
-
-    setIsSharingLocation(true);
-    lastSentRef.current = 0;
-    lastPositionRef.current = null;
-
-    watchIdRef.current = navigator.geolocation.watchPosition(
-      (position) => {
-        lastPositionRef.current = {
-          lat: position.coords.latitude,
-          lng: position.coords.longitude,
-          accuracy: position.coords.accuracy,
-        };
-        const now = Date.now();
-        if (now - lastSentRef.current < LOCATION_MIN_INTERVAL_MS) return;
-        lastSentRef.current = now;
-        socketRef.current?.emit("shareLocation", { tripId: id, ...lastPositionRef.current });
-      },
-      (error) => {
-        console.error("Location watch error:", error);
-        // TIMEOUT is transient (e.g. weak GPS indoors) — keep watching.
-        if (error.code === error.TIMEOUT) return;
-        setLocationError(
-          error.code === error.PERMISSION_DENIED
-            ? "Location permission denied. Allow location access in your browser settings."
-            : `Location error: ${error.message}`
-        );
-        stopSharingLocation();
-      },
-      { enableHighAccuracy: true, timeout: 20000, maximumAge: 5000 }
-    );
-  };
-
-  const stopSharingLocation = () => {
-    clearLocationWatch();
-    setIsSharingLocation(false);
-    socketRef.current?.emit("stopSharingLocation", { tripId: id });
-    if (user?._id) {
-      setLiveLocations((prev) => {
-        const next = { ...prev };
-        delete next[user._id];
-        return next;
-      });
-    }
-  };
-
-  const toggleLocationSharing = () => (isSharingLocation ? stopSharingLocation() : startSharingLocation());
 
   // --- Chat ---
   const handleImagePick = (e) => {
@@ -313,7 +245,15 @@ export default function TripDetails() {
     const text = messageText.trim();
     if (!text && !selectedImage) return;
     if (text.length > 2000) return setChatError("Messages can be at most 2000 characters.");
-    if (!socketRef.current?.connected) return setChatError("Not connected to chat. Please wait a moment.");
+
+    // Offline: queue text messages on the device; they're sent automatically
+    // when the connection returns.
+    if (!navigator.onLine || !socketRef.current?.connected) {
+      if (selectedImage) return setChatError("Images can't be sent while offline. Remove it to queue your text.");
+      await queueOffline("message", id, { text });
+      setMessageText("");
+      return;
+    }
 
     setSending(true);
     let imageUrl = "";
@@ -396,6 +336,15 @@ export default function TripDetails() {
       setExpenseForm({ description: "", amount: "" });
       await loadExpenses();
     } catch (err) {
+      if (isNetworkError(err)) {
+        await queueOffline("expense", id, {
+          description: expenseForm.description.trim(),
+          amount: Number(expenseForm.amount),
+          expenseType: "common",
+        });
+        setExpenseForm({ description: "", amount: "" });
+        return;
+      }
       setExpenseError(err.response?.data?.message || "Could not add the expense.");
     }
   };
@@ -416,6 +365,17 @@ export default function TripDetails() {
       setSelectedMembers([]);
       await loadExpenses();
     } catch (err) {
+      if (isNetworkError(err)) {
+        await queueOffline("expense", id, {
+          description: customExpenseForm.description.trim(),
+          amount: Number(customExpenseForm.amount),
+          splitBetween: selectedMembers,
+          expenseType: "custom",
+        });
+        setCustomExpenseForm({ description: "", amount: "" });
+        setSelectedMembers([]);
+        return;
+      }
       setCustomExpenseError(err.response?.data?.message || "Could not add the expense.");
     }
   };
@@ -469,8 +429,14 @@ export default function TripDetails() {
         ← All trips
       </Link>
 
-      {fromCache && (
-        <div className="alert-info mt-4">📴 You're viewing a saved copy of this trip. Some data may be out of date.</div>
+      {(savedAt || !online) && (
+        <div className="alert-info mt-4">
+          <span>📴</span>
+          <span>
+            {online ? "Couldn't reach the server — " : "You're offline — "}showing this trip as saved on your device
+            {savedAt ? ` ${timeAgo(savedAt)}` : ""}. Messages and expenses you add will be sent when you're back online.
+          </span>
+        </div>
       )}
 
       {/* Hero */}
@@ -773,7 +739,7 @@ export default function TripDetails() {
 
           {/* Messages */}
           <div className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
-            {messages.length === 0 && (
+            {messages.length === 0 && pendingMessages.length === 0 && (
               <div className="py-16 text-center text-slate-400">
                 <div className="text-4xl">💬</div>
                 <p className="mt-2 text-sm">No messages yet — say hi to your travel group!</p>
@@ -805,6 +771,14 @@ export default function TripDetails() {
                 </div>
               );
             })}
+            {pendingMessages.map((p) => (
+              <div key={`pending-${p.id}`} className="flex flex-row-reverse items-end gap-2">
+                <div className="max-w-[75%] rounded-2xl rounded-br-md bg-brand-600/60 px-3.5 py-2 text-sm text-white shadow-sm">
+                  <p className="whitespace-pre-wrap break-words">{p.payload.text}</p>
+                  <p className="mt-0.5 text-right text-[10px] text-white/80">⏳ Will send when online</p>
+                </div>
+              </div>
+            ))}
             <div ref={messagesEndRef} />
           </div>
 
@@ -835,7 +809,7 @@ export default function TripDetails() {
               <input
                 value={messageText}
                 onChange={(e) => setMessageText(e.target.value)}
-                placeholder="Type a message…"
+                placeholder={online ? "Type a message…" : "Offline: messages will send later…"}
                 maxLength={2000}
                 className="input flex-1"
               />
@@ -879,6 +853,24 @@ export default function TripDetails() {
               </form>
               {expenseError && <p className="field-error">{expenseError}</p>}
 
+              {pendingExpenses.length > 0 && (
+                <ul className="mt-4 space-y-2">
+                  {pendingExpenses.map((p) => (
+                    <li
+                      key={`pe-${p.id}`}
+                      className="flex items-center justify-between rounded-xl border border-dashed border-amber-300 bg-amber-50 px-3 py-2 text-sm dark:border-amber-800 dark:bg-amber-950/30"
+                    >
+                      <span>
+                        ⏳ {p.payload.description}
+                        <span className="text-xs text-amber-700 dark:text-amber-300">
+                          {" "}· {p.payload.expenseType === "custom" ? "custom split · " : ""}will sync when online
+                        </span>
+                      </span>
+                      <strong>{formatINR(p.payload.amount)}</strong>
+                    </li>
+                  ))}
+                </ul>
+              )}
               <ExpenseList expenses={expenses} />
             </div>
             <BalanceCard title="Balances" summary={summary} />

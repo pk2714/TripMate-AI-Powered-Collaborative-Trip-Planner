@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import api from "../api/axios";
+import { cachedGet, timeAgo, useOfflineSync } from "../utils/offline.js";
 import TripCard from "../components/TripCard.jsx";
 import InstallBanner from "../components/InstallBanner.jsx";
 import { useAuth } from "../context/AuthContext.jsx";
@@ -22,6 +22,8 @@ export default function Dashboard() {
   const [filter, setFilter] = useState("all");
   const [error, setError] = useState(null);
   const [reloadKey, setReloadKey] = useState(0);
+  const [savedAt, setSavedAt] = useState(null); // set when showing trips saved on this device
+  const { syncing, lastSync } = useOfflineSync();
 
   // Don't hit the API on every keystroke.
   useEffect(() => {
@@ -34,15 +36,22 @@ export default function Dashboard() {
     setLoading(true);
     setError(null);
 
-    api
-      .get("/trips", { params: debouncedSearch ? { destination: debouncedSearch } : {} })
-      .then((res) => !cancelled && setTrips(res.data?.trips || []))
+    cachedGet("/trips", debouncedSearch ? { destination: debouncedSearch } : undefined)
+      .then(({ data, fromCache, savedAt: at }) => {
+        if (cancelled) return;
+        setTrips(data?.trips || []);
+        setSavedAt(fromCache ? at : null);
+      })
       .catch((err) => {
         if (cancelled) return;
         console.error("Error fetching trips:", err);
         setError(
           err.response?.data?.message ||
-            "Unable to connect to the server. On Render's free tier the backend can take ~45s to wake up."
+            (navigator.onLine
+              ? "Unable to connect to the server. On Render's free tier the backend can take ~45s to wake up."
+              : debouncedSearch
+              ? "You're offline and this search hasn't been saved on your device. Clear the search to see saved trips."
+              : "You're offline and no trips have been saved on this device in the last 24 hours.")
         );
       })
       .finally(() => !cancelled && setLoading(false));
@@ -131,6 +140,24 @@ export default function Dashboard() {
             ))}
           </div>
         </div>
+
+        {/* Offline status */}
+        {savedAt ? (
+          <div className="alert-info mt-4">
+            <span>📴</span>
+            <span>
+              Offline — showing trips saved on your device <strong>{timeAgo(savedAt)}</strong>. Data from the last 24
+              hours is available offline.
+            </span>
+          </div>
+        ) : (
+          user &&
+          (syncing || lastSync) && (
+            <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">
+              {syncing ? "⏳ Saving your trips for offline use…" : `✅ Your trips are saved for offline use · synced ${timeAgo(lastSync)}`}
+            </p>
+          )
+        )}
 
         {/* Legend */}
         <p className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500 dark:text-slate-400">

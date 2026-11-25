@@ -39,6 +39,18 @@ const GEO_TYPES = {
   hotel: "accommodation.hotel",
 };
 
+// A location is "stale" when the sharer's connection dropped (server marks it
+// offline) or no update arrived for 2 minutes (heartbeat is every 20s).
+const STALE_MS = 2 * 60 * 1000;
+const isStale = (loc) => loc.offline || Date.now() - new Date(loc.timestamp).getTime() > STALE_MS;
+const lastSeen = (loc) => {
+  const s = Math.max(0, Math.round((Date.now() - new Date(loc.timestamp).getTime()) / 1000));
+  if (s < 30) return "just now";
+  if (s < 90) return "1 min ago";
+  if (s < 3600) return `${Math.round(s / 60)} min ago`;
+  return `${Math.round(s / 3600)} h ago`;
+};
+
 // Smooth map panning helper
 function MapViewHandler({ center, zoom }) {
   const map = useMap();
@@ -131,6 +143,14 @@ export default function TripMap({
 
   const activeMembers = Object.entries(liveLocations || {});
 
+  // Re-render every 15s so "last seen" labels and stale colours stay current.
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (!activeMembers.length) return;
+    const t = setInterval(() => setTick((n) => n + 1), 15000);
+    return () => clearInterval(t);
+  }, [activeMembers.length]);
+
   const locateUser = (lat, lng) => {
     setMapCenter([lat, lng]);
     setMapZoom(15);
@@ -216,6 +236,7 @@ export default function TripMap({
           <div className="flex flex-wrap items-center gap-1.5">
             {activeMembers.map(([userId, loc]) => {
               const isMe = currentUser && currentUser._id === userId;
+              const stale = isStale(loc);
               return (
                 <button
                   key={userId}
@@ -227,7 +248,9 @@ export default function TripMap({
                   }`}
                   title="Click to locate on map"
                 >
+                  <span className={`h-2 w-2 rounded-full ${stale ? "bg-slate-400" : "bg-emerald-400"}`} />
                   <span>{isMe ? "📍 You" : `👤 ${loc.userName || "Member"}`}</span>
+                  {stale && <span className="text-[10px] opacity-75">· {lastSeen(loc)}</span>}
                   <span className="text-[10px] opacity-75">🔍</span>
                 </button>
               );
@@ -335,7 +358,9 @@ export default function TripMap({
         {/* Real-Time Live Location Markers */}
         {activeMembers.map(([userId, loc]) => {
           const isMe = currentUser && currentUser._id === userId;
-          const markerColor = isMe ? "#2563EB" : "#10B981";
+          const stale = isStale(loc);
+          // Live: blue (you) / green (others). No recent update: gray.
+          const markerColor = stale ? "#94A3B8" : isMe ? "#2563EB" : "#10B981";
 
           return (
             <Fragment key={userId}>
@@ -365,11 +390,16 @@ export default function TripMap({
                 <Popup>
                   <div className="p-1 min-w-[150px]">
                     <div className="flex items-center gap-1.5 font-bold text-xs text-gray-900 mb-1">
-                      <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping" />
-                      <span>{isMe ? "📍 You (Live)" : `👤 ${loc.userName || "Trip Member"}`}</span>
+                      <span className={`w-2 h-2 rounded-full ${stale ? "bg-slate-400" : "bg-emerald-500 animate-ping"}`} />
+                      <span>
+                        {isMe ? "📍 You" : `👤 ${loc.userName || "Trip Member"}`}
+                        {stale ? " · offline" : " · live"}
+                      </span>
                     </div>
                     <p className="text-[11px] text-gray-500 mb-1">
-                      Updated: {new Date(loc.timestamp).toLocaleTimeString()}
+                      {stale ? `Last seen ${lastSeen(loc)}` : `Updated ${lastSeen(loc)}`} ·{" "}
+                      {new Date(loc.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                      {loc.accuracy ? ` · ±${loc.accuracy} m` : ""}
                     </p>
                     <p className="text-[10px] text-gray-400 font-mono">
                       {loc.lat.toFixed(4)}, {loc.lng.toFixed(4)}

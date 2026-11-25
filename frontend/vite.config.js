@@ -113,7 +113,8 @@ export default defineConfig({
             options: {
               cacheName: "api-data",
               networkTimeoutSeconds: 10,
-              expiration: { maxEntries: 150, maxAgeSeconds: 7 * DAY },
+              // Last 24 hours of data stays available offline.
+              expiration: { maxEntries: 300, maxAgeSeconds: DAY },
               cacheableResponse: { statuses: [200] },
             },
           },

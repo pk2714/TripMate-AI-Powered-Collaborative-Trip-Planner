@@ -3,8 +3,11 @@ import Navbar from "./components/Navbar.jsx";
 import ProtectedRoute from "./components/ProtectedRoute.jsx";
 import ChatBot from "./components/ChatBot.jsx";
 import PwaManager from "./components/PwaManager.jsx";
+import OfflineSync from "./components/OfflineSync.jsx";
+import LiveLocationIndicator from "./components/LiveLocationIndicator.jsx";
 import { useAuth } from "./context/AuthContext.jsx";
 import { ChatBotProvider } from "./context/ChatBotContext.jsx";
+import { LiveLocationProvider } from "./context/LiveLocationContext.jsx";
 import Login from "./pages/Login.jsx";
 import Register from "./pages/Register.jsx";
 import VerifyEmail from "./pages/VerifyEmail.jsx";
@@ -21,9 +24,12 @@ export default function App() {
 
   return (
     <ChatBotProvider>
+    <LiveLocationProvider>
     <div className="min-h-screen pb-28">
       <PwaManager />
+      <OfflineSync />
       <Navbar />
+      <LiveLocationIndicator />
       <Routes>
         <Route path="/" element={<Dashboard />} />
         <Route path="/login" element={<Login />} />
@@ -63,6 +69,7 @@ export default function App() {
           conversation resets on login/logout. */}
       <ChatBot key={user?._id || "guest"} />
     </div>
+    </LiveLocationProvider>
     </ChatBotProvider>
   );
 }

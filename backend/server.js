@@ -68,6 +68,9 @@ const io = new Server(server, {
   },
 });
 
+// Lets REST routes broadcast over Socket.IO (e.g. messages queued offline).
+app.set("io", io);
+
 connectDB();
 
 // ── Middleware ──

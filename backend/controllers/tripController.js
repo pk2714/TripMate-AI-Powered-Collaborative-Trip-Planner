@@ -128,6 +128,34 @@ const getTrips = asyncHandler(async (req, res) => {
   });
 });
 
+// GET /api/trips/mine — trips the logged-in user organizes, belongs to, or
+// has requested to join. Used by the app to sync trips for offline use.
+const getMyTrips = asyncHandler(async (req, res) => {
+  const memberships = await TripMember.find({
+    user: req.session.userId,
+    status: { $in: ["accepted", "requested"] },
+  });
+  const statusByTrip = Object.fromEntries(memberships.map((m) => [m.trip.toString(), m.status]));
+
+  const trips = await Trip.find({ _id: { $in: memberships.map((m) => m.trip) } })
+    .populate("organizer", "name profilePhoto verificationStatus")
+    .sort({ startDate: 1 });
+
+  const counts = await TripMember.aggregate([
+    { $match: { trip: { $in: trips.map((t) => t._id) }, status: "accepted" } },
+    { $group: { _id: "$trip", count: { $sum: 1 } } },
+  ]);
+  const countByTrip = Object.fromEntries(counts.map((c) => [c._id.toString(), c.count]));
+
+  res.json({
+    trips: trips.map((t) => ({
+      ...t.toJSON(),
+      memberCount: countByTrip[t._id.toString()] || 0,
+      myStatus: statusByTrip[t._id.toString()],
+    })),
+  });
+});
+
 // GET /api/trips/:id
 const getTripById = asyncHandler(async (req, res) => {
   if (!isObjectId(req.params.id)) return res.status(400).json({ message: "Invalid trip id." });
@@ -327,6 +355,7 @@ const leaveTrip = asyncHandler(async (req, res) => {
 module.exports = {
   createTrip,
   getTrips,
+  getMyTrips,
   getTripById,
   updateTrip,
   deleteTrip,
